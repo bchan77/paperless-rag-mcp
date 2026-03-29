@@ -1,3 +1,4 @@
+import { getConfig, getStorageMode } from "../config.js";
 import type { Tool } from "./types.js";
 
 /**
@@ -38,7 +39,7 @@ export const ragTools: Tool[] = [
         message: "rag_query not yet implemented with real vector store",
         query: args.query,
         results: [],
-        storage_mode: process.env.QDRANT_URL ? "qdrant" : "lancedb",
+        storage_mode: getStorageMode(getConfig()),
       };
     },
   },
@@ -92,7 +93,7 @@ export const ragTools: Tool[] = [
       return {
         message: "rag_sync not yet implemented",
         synced_count: 0,
-        storage_mode: process.env.QDRANT_URL ? "qdrant" : "lancedb",
+        storage_mode: getStorageMode(getConfig()),
       };
     },
   },
@@ -106,7 +107,7 @@ export const ragTools: Tool[] = [
     handler: async () => {
       return {
         total_documents: mockVectorStore.length,
-        storage_mode: process.env.QDRANT_URL ? "qdrant" : "lancedb",
+        storage_mode: getStorageMode(getConfig()),
         status: "initialized",
       };
     },

@@ -1,16 +1,25 @@
+import { createRequire } from "module";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { initConfig } from "./config.js";
 import { paperlessTools } from "./tools/paperless.js";
 import { ragTools } from "./tools/rag.js";
 
+// Read package.json for name and version
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { name: string; version: string };
+
+// Validate config at startup before registering tools
+initConfig();
+
 const server = new Server(
   {
-    name: "paperless-rag-mcp",
-    version: "0.1.0",
+    name: pkg.name,
+    version: pkg.version,
   },
   {
     capabilities: {

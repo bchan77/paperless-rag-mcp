@@ -55,18 +55,29 @@ cd paperless-rag-mcp
 # Install dependencies
 npm install
 
-# Run in development mode
+# Copy .env.example to .env and fill in your values
+cp .env.example .env
+# Edit .env with your Paperless URL and API token
+
+# Run in development mode (loads .env automatically)
 npm run dev
 ```
 
 ### Environment Variables
 
+**Required:**
+
+| Variable | Description |
+|----------|-------------|
+| `PAPERLESS_URL` | Your Paperless-ngx instance URL (e.g., `http://paperless.local:8000`) |
+| `PAPERLESS_TOKEN` | Paperless API token (generate in Settings > API Tokens) |
+
+**Optional:**
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PAPERLESS_URL` | Paperless-ngx URL | `http://paperless.homelab.local` |
-| `PAPERLESS_TOKEN` | Paperless API token | Required |
 | `QDRANT_URL` | Qdrant URL (if using instead of LanceDB) | Not set (uses LanceDB) |
-| `OPENAI_API_KEY` | OpenAI API key for embeddings | Required for embeddings |
+| `OPENAI_API_KEY` | OpenAI API key for embeddings | Not set (required when using RAG features) |
 
 ### Project Structure
 
