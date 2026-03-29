@@ -15,7 +15,7 @@ This project extends the [paperless-mcp](https://github.com/baruchiro/paperless-
 ```
 MCP-Compatible AI Assistant → paperless-rag-mcp → Paperless-ngx
                                          ↓
-                                  Vector DB (Qdrant)
+                                  Vector DB (LanceDB or Qdrant)
                                          ↓
                                  Unstructured SDK
                                          ↓
@@ -26,7 +26,7 @@ MCP-Compatible AI Assistant → paperless-rag-mcp → Paperless-ngx
 
 - **MCP Server**: TypeScript/Node.js
 - **Document Processing**: [Unstructured](https://github.com/Unstructured-IO/unstructured)
-- **Vector Database**: Qdrant (self-hosted or cloud)
+- **Vector Database**: LanceDB (default) or Qdrant (when QDRANT_URL is set)
 - **Embeddings**: OpenAI `text-embedding-3-small` or local alternatives
 
 ## Features
@@ -38,13 +38,62 @@ MCP-Compatible AI Assistant → paperless-rag-mcp → Paperless-ngx
 - 📦 Uses `@baruchiro/paperless-mcp` as npm dependency
 - 🤖 Works with MCP-compatible AI assistants (Claude, OpenClaw, Cursor, Continue.dev, etc.)
 
-## Getting Started
+## Development
 
-_TBD_
+### Prerequisites
 
-## Why
+- Node.js 20+
+- npm or pnpm
 
-This project was created for interview prep at **Unstructured**, the company behind the popular open-source document processing pipeline.
+### Setup
+
+```bash
+# Clone the repo
+git clone https://gitea.homelab.local/AI/paperless-rag-mcp.git
+cd paperless-rag-mcp
+
+# Install dependencies
+npm install
+
+# Run in development mode
+npm run dev
+```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PAPERLESS_URL` | Paperless-ngx URL | `http://paperless.homelab.local` |
+| `PAPERLESS_TOKEN` | Paperless API token | Required |
+| `QDRANT_URL` | Qdrant URL (if using instead of LanceDB) | Not set (uses LanceDB) |
+| `OPENAI_API_KEY` | OpenAI API key for embeddings | Required for embeddings |
+
+### Project Structure
+
+```
+paperless-rag-mcp/
+├── src/
+│   ├── index.ts           # Main MCP server
+│   └── tools/
+│       ├── types.ts       # Shared types
+│       ├── paperless.ts   # Paperless document tools
+│       └── rag.ts         # RAG query/summarize/sync tools
+├── package.json
+├── tsconfig.json
+└── README.md
+```
+
+### Available Tools
+
+**Paperless Tools:**
+- `paperless_list_documents` - List all documents
+- `paperless_get_document` - Get a specific document
+
+**RAG Tools:**
+- `rag_query` - Query documents using natural language
+- `rag_summarize` - Summarize a document
+- `rag_sync` - Sync documents from Paperless to vector store
+- `rag_stats` - Get vector store statistics
 
 ## License
 
