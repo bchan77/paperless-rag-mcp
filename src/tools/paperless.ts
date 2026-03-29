@@ -6,6 +6,18 @@ import type { Tool } from "./types.js";
  * Will be replaced with actual paperless-mcp integration.
  */
 
+// Validate required environment variables
+const paperlessUrl = process.env.PAPERLESS_URL;
+const paperlessToken = process.env.PAPERLESS_TOKEN;
+
+if (!paperlessUrl) {
+  throw new Error("PAPERLESS_URL environment variable is required");
+}
+
+if (!paperlessToken) {
+  throw new Error("PAPERLESS_TOKEN environment variable is required");
+}
+
 export const paperlessTools: Tool[] = [
   {
     name: "paperless_list_documents",
@@ -30,7 +42,6 @@ export const paperlessTools: Tool[] = [
       return {
         message: "paperless_list_documents not yet implemented",
         documents: [],
-        paperless_url: process.env.PAPERLESS_URL || "http://paperless.homelab.local",
       };
     },
   },
