@@ -13,13 +13,13 @@ This project extends the [paperless-mcp](https://github.com/baruchiro/paperless-
 ## Architecture
 
 ```
-AI Assistant (Claude, OpenAI, OpenClaw, etc.) → paperless-rag-mcp → Paperless-ngx
-                                                          ↓
-                                                   Vector DB (Qdrant)
-                                                          ↓
-                                                  Unstructured SDK
-                                                          ↓
-                                                  Document Processing
+MCP-Compatible AI Assistant → paperless-rag-mcp → Paperless-ngx
+                                         ↓
+                                  Vector DB (Qdrant)
+                                         ↓
+                                 Unstructured SDK
+                                         ↓
+                                 Document Processing
 ```
 
 ## Tech Stack
@@ -36,7 +36,7 @@ AI Assistant (Claude, OpenAI, OpenClaw, etc.) → paperless-rag-mcp → Paperles
 - 💬 Q&A over document content
 - 🔄 Sync documents to vector store
 - 📦 Uses `@baruchiro/paperless-mcp` as npm dependency
-- 🤖 Works with any MCP-compatible AI assistant
+- 🤖 Works with MCP-compatible AI assistants (Claude, OpenClaw, Cursor, Continue.dev, etc.)
 
 ## Getting Started
 
