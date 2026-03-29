@@ -48,7 +48,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   try {
-    const result = await tool.handler(request.params.arguments);
+    const result = await tool.handler(request.params.arguments ?? {});
     return {
       content: [
         {
