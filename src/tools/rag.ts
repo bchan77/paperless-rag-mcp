@@ -1,18 +1,10 @@
-import { getConfig, getStorageMode } from "../config.js";
+import { getVectorStore, getStorageModeLabel, type DocumentChunk } from "../vector-store.js";
 import type { Tool } from "./types.js";
 
 /**
  * RAG tools - vector storage and search
  * Uses LanceDB as default, can fall back to Qdrant if configured
  */
-
-// In-memory mock storage for initial development
-let mockVectorStore: Array<{
-  id: string;
-  content: string;
-  metadata: Record<string, unknown>;
-  embedding: number[];
-}> = [];
 
 export const ragTools: Tool[] = [
   {
@@ -34,12 +26,15 @@ export const ragTools: Tool[] = [
       required: ["query"],
     },
     handler: async (args: Record<string, unknown>) => {
-      // TODO: Implement actual vector search with LanceDB/Qdrant
+      // TODO: Implement actual vector search with embeddings
+      // - Embed the query using OpenAI or local embeddings
+      // - Search the vector store
       return {
-        message: "rag_query not yet implemented with real vector store",
+        message: "rag_query not yet implemented with embeddings",
         query: args.query,
         results: [],
-        storage_mode: getStorageMode(getConfig()),
+        storage_mode: getStorageModeLabel(),
+        note: "Embeddings need to be implemented first",
       };
     },
   },
@@ -67,6 +62,7 @@ export const ragTools: Tool[] = [
         message: "rag_summarize not yet implemented",
         document_id: args.document_id,
         summary: "",
+        storage_mode: getStorageModeLabel(),
       };
     },
   },
@@ -91,9 +87,9 @@ export const ragTools: Tool[] = [
     handler: async (args: Record<string, unknown>) => {
       // TODO: Implement actual sync with Unstructured + embeddings
       return {
-        message: "rag_sync not yet implemented",
+        message: "rag_sync not yet implemented - need to implement embeddings first",
         synced_count: 0,
-        storage_mode: getStorageMode(getConfig()),
+        storage_mode: getStorageModeLabel(),
       };
     },
   },
@@ -105,11 +101,22 @@ export const ragTools: Tool[] = [
       properties: {},
     },
     handler: async () => {
-      return {
-        total_documents: mockVectorStore.length,
-        storage_mode: getStorageMode(getConfig()),
-        status: "initialized",
-      };
+      try {
+        const store = await getVectorStore();
+        const stats = await store.stats();
+        return {
+          total_documents: stats.count,
+          storage_mode: stats.storageMode,
+          status: "initialized",
+        };
+      } catch (error) {
+        return {
+          total_documents: 0,
+          storage_mode: getStorageModeLabel(),
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
     },
   },
 ];

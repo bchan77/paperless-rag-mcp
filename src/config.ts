@@ -12,6 +12,10 @@ export interface Config {
 
   // Optional: Qdrant vector database (defaults to LanceDB if not set)
   qdrantUrl: string | undefined;
+  qdrantCollection: string;
+
+  // Optional: LanceDB storage path (defaults to ./data/lancedb)
+  lancedbPath: string;
 
   // Optional: OpenAI API key (required when RAG features are used)
   openaiApiKey: string | undefined;
@@ -31,8 +35,10 @@ export function loadConfig(): Config {
   const errors: ConfigError[] = [];
 
   const paperlessUrl = process.env.PAPERLESS_URL;
-  const paperlessToken = process.env.PAPERLESS_TOKEN;
+  const paperlessToken = process.env.PAPERLESS_API_KEY;
   const qdrantUrl = process.env.QDRANT_URL;
+  const qdrantCollection = process.env.QDRANT_COLLECTION || "paperless_documents";
+  const lancedbPath = process.env.LANCEDB_PATH || "./data/lancedb";
   const openaiApiKey = process.env.OPENAI_API_KEY;
 
   // Validate required variables
@@ -70,6 +76,8 @@ export function loadConfig(): Config {
     paperlessUrl: paperlessUrl!,
     paperlessToken: paperlessToken!,
     qdrantUrl,
+    qdrantCollection,
+    lancedbPath,
     openaiApiKey,
   };
 }

@@ -14,6 +14,7 @@
     "@baruchiro/paperless-mcp": "^0.4.1",
     "@lancedb/lancedb": "^0.27.1",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@qdrant/js-client-rest": "^1.17.0",
     "openai": "^4.0.0",
     "unstructured-client": "^0.24.1"
   },
