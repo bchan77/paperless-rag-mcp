@@ -3,6 +3,11 @@
  * 
  * Provides a unified interface for vector storage.
  * Uses LanceDB by default (local file-based), or Qdrant if QDRANT_URL is configured.
+ * 
+ * Features:
+ * - Stores document chunks with embeddings
+ * - Tracks indexed documents for delta sync
+ * - Supports LanceDB (default) and Qdrant
  */
 
 import { getConfig, getStorageMode } from "./config.js";
@@ -16,6 +21,7 @@ export interface DocumentChunk {
     source: string;
     page?: number;
     created?: string;
+    modified?: string;  // Paperless document modification time
     [key: string]: unknown;
   };
   embedding?: number[];
@@ -37,6 +43,20 @@ export interface ChunkInfo {
   source: string;
   page: number | null;
   created: string | null;
+}
+
+// Indexed document tracking
+export interface IndexedDocument {
+  document_id: number;
+  last_modified: string;
+  indexed_at: string;
+  chunk_count: number;
+}
+
+export interface SyncStatus {
+  total_indexed: number;
+  documents: IndexedDocument[];
+  last_sync: string | null;
 }
 
 export interface VectorStore {
@@ -69,6 +89,22 @@ export interface VectorStore {
    * Inspect chunks (for debugging)
    */
   inspect(limit?: number, documentId?: number): Promise<ChunkInfo[]>;
+  
+  /**
+   * Get sync status - list of indexed documents with timestamps
+   */
+  getSyncStatus(): Promise<SyncStatus>;
+  
+  /**
+   * Check if documents need syncing (new or modified since last index)
+   * Returns list of document IDs that need to be re-indexed
+   */
+  getDocumentsNeedingSync(documents: Array<{ id: number; modified: string }>): Promise<number[]>;
+  
+  /**
+   * Mark documents as indexed (update tracking info)
+   */
+  markDocumentsIndexed(documentId: number, lastModified: string, chunkCount: number): Promise<void>;
 }
 
 // LanceDB implementation
@@ -77,6 +113,7 @@ import { connect, Table } from "@lancedb/lancedb";
 class LanceDBVectorStore implements VectorStore {
   private db: Awaited<ReturnType<typeof connect>> | null = null;
   private table: Table | null = null;
+  private indexedTable: Table | null = null;
   private readonly dbPath: string;
   
   constructor(dbPath: string) {
@@ -86,13 +123,25 @@ class LanceDBVectorStore implements VectorStore {
   async initialize(): Promise<void> {
     this.db = await connect(this.dbPath);
 
-    // Check if table exists, open it if so
-    // Table will be created on first addDocuments call with actual data
     const tableNames = await this.db.tableNames();
+    
+    // Open or create documents table
     if (tableNames.includes("documents")) {
       this.table = await this.db.openTable("documents");
     }
-    // If table doesn't exist, this.table stays null until addDocuments is called
+    
+    // Open or create indexed_documents tracking table
+    if (tableNames.includes("indexed_documents")) {
+      this.indexedTable = await this.db.openTable("indexed_documents");
+    } else {
+      // Create tracking table
+      this.indexedTable = await this.db.createTable("indexed_documents", [
+        { name: "document_id", type: "int32" },
+        { name: "last_modified", type: "string" },
+        { name: "indexed_at", type: "string" },
+        { name: "chunk_count", type: "int32" },
+      ]);
+    }
   }
   
   async addDocuments(chunks: DocumentChunk[]): Promise<void> {
@@ -112,7 +161,6 @@ class LanceDBVectorStore implements VectorStore {
     }));
 
     if (!this.table) {
-      // Create table with first batch of data - LanceDB infers schema from data
       this.table = await this.db.createTable("documents", rows);
     } else {
       await this.table.add(rows);
@@ -121,23 +169,21 @@ class LanceDBVectorStore implements VectorStore {
   
   async search(queryEmbedding: number[], limit: number = 5): Promise<SearchResult[]> {
     if (!this.table) {
-      // No documents indexed yet
       return [];
     }
 
     // Note: LanceDB search requires actual vectors
-    // For now, return empty results until embeddings are implemented
-    console.log("LanceDB search called - embeddings not yet implemented");
+    console.error("LanceDB search called - embeddings not yet implemented");
     return [];
   }
   
   async deleteDocument(documentId: number): Promise<void> {
-    if (!this.table) {
-      // No documents indexed yet, nothing to delete
+    if (!this.table || !this.indexedTable) {
       return;
     }
 
     await this.table.delete(`document_id = ${documentId}`);
+    await this.indexedTable.delete(`document_id = ${documentId}`);
   }
   
   async stats(): Promise<{ count: number; storageMode: "qdrant" | "lancedb" }> {
@@ -151,11 +197,9 @@ class LanceDBVectorStore implements VectorStore {
   
   async inspect(limit: number = 10, documentId?: number): Promise<ChunkInfo[]> {
     if (!this.table) {
-      // No documents indexed yet
       return [];
     }
-
-    // Get all rows - let LanceDB handle the schema
+    
     let results: any[];
     if (documentId !== undefined) {
       results = await this.table.query().where(`document_id = ${documentId}`).limit(limit).toArray();
@@ -163,22 +207,90 @@ class LanceDBVectorStore implements VectorStore {
       results = await this.table.query().limit(limit).toArray();
     }
     
-    return results.map((row: any) => {
-      // Handle different possible field names (snake_case vs camelCase)
-      const docId = row.document_id ?? row.documentId ?? row.id;
-      const chunkId = row.chunk_id ?? row.chunkId ?? row.id;
-      const contentField = row.content ?? row.text ?? row.page_content ?? "";
-      
-      return {
-        chunk_id: chunkId,
-        document_id: docId,
-        title: row.title ?? "",
-        content_preview: (contentField || "").substring(0, 200) + ((contentField || "").length > 200 ? "..." : ""),
-        source: row.source ?? "",
-        page: row.page ?? null,
-        created: row.created ?? null,
-      };
+    return results.map((row: any) => ({
+      chunk_id: row.chunk_id,
+      document_id: row.document_id,
+      title: row.title || "",
+      content_preview: (row.content || "").substring(0, 200) + ((row.content || "").length > 200 ? "..." : ""),
+      source: row.source || "",
+      page: row.page || null,
+      created: row.created || null,
+    }));
+  }
+
+  async getSyncStatus(): Promise<SyncStatus> {
+    if (!this.indexedTable) {
+      return { total_indexed: 0, documents: [], last_sync: null };
+    }
+    
+    const results = await this.indexedTable.query().toArray();
+    
+    const documents: IndexedDocument[] = results.map((row: any) => ({
+      document_id: row.document_id,
+      last_modified: row.last_modified,
+      indexed_at: row.indexed_at,
+      chunk_count: row.chunk_count,
+    }));
+    
+    const lastSync = documents.length > 0 
+      ? documents.reduce((latest, doc) => doc.indexed_at > latest ? doc.indexed_at : latest, documents[0].indexed_at)
+      : null;
+    
+    return {
+      total_indexed: documents.length,
+      documents,
+      last_sync: lastSync,
+    };
+  }
+
+  async getDocumentsNeedingSync(documents: Array<{ id: number; modified: string }>): Promise<number[]> {
+    if (!this.indexedTable) {
+      // No tracking, sync everything
+      return documents.map(d => d.id);
+    }
+    
+    const results = await this.indexedTable.query().toArray();
+    const indexed = new Map<number, { last_modified: string }>();
+    
+    results.forEach((row: any) => {
+      indexed.set(row.document_id, { last_modified: row.last_modified });
     });
+    
+    const needsSync: number[] = [];
+    
+    for (const doc of documents) {
+      const existing = indexed.get(doc.id);
+      if (!existing) {
+        // New document
+        needsSync.push(doc.id);
+      } else if (doc.modified > existing.last_modified) {
+        // Document was modified
+        needsSync.push(doc.id);
+      }
+    }
+    
+    return needsSync;
+  }
+
+  async markDocumentsIndexed(documentId: number, lastModified: string, chunkCount: number): Promise<void> {
+    if (!this.indexedTable) {
+      return;
+    }
+    
+    const indexedAt = new Date().toISOString();
+    
+    // Delete existing entry if any
+    await this.indexedTable.delete(`document_id = ${documentId}`);
+    
+    // Add new entry
+    const rows = [{
+      document_id: documentId,
+      last_modified: lastModified,
+      indexed_at: indexedAt,
+      chunk_count: chunkCount,
+    }];
+    
+    await this.indexedTable.add(rows as any);
   }
 }
 
@@ -189,25 +301,31 @@ class QdrantVectorStore implements VectorStore {
   private client: QdrantClient | null = null;
   private readonly url: string;
   private readonly collection: string;
+  private readonly indexedCollection: string;
   
   constructor(url: string, collection: string) {
     this.url = url;
     this.collection = collection;
+    this.indexedCollection = `${collection}_indexed`;
   }
   
   async initialize(): Promise<void> {
     this.client = new QdrantClient({ url: this.url });
     
-    // Create collection if it doesn't exist
+    // Create main collection if not exists
     const collections = await this.client.getCollections();
     const collectionNames = collections.collections.map(c => c.name);
     
     if (!collectionNames.includes(this.collection)) {
       await this.client.createCollection(this.collection, {
-        vectors: {
-          size: 1536, // OpenAI embedding dimension
-          distance: "Cosine",
-        },
+        vectors: { size: 1536, distance: "Cosine" },
+      });
+    }
+    
+    // Create indexed tracking collection if not exists
+    if (!collectionNames.includes(this.indexedCollection)) {
+      await this.client.createCollection(this.indexedCollection, {
+        vectors: { size: 1, distance: "Dot" },  // Dummy vector for tracking
       });
     }
   }
@@ -217,7 +335,7 @@ class QdrantVectorStore implements VectorStore {
       throw new Error("Vector store not initialized. Call initialize() first.");
     }
     
-    const points = chunks.map((chunk, index) => ({
+    const points = chunks.map((chunk) => ({
       id: chunk.id,
       vector: chunk.embedding || new Array(1536).fill(0),
       payload: {
@@ -255,10 +373,16 @@ class QdrantVectorStore implements VectorStore {
   
   async deleteDocument(documentId: number): Promise<void> {
     if (!this.client) {
-      throw new Error("Vector store not initialized. Call initialize() first.");
+      return;
     }
     
     await this.client.delete(this.collection, {
+      filter: {
+        must: [{ key: "document_id", match: { value: documentId } }],
+      },
+    });
+    
+    await this.client.delete(this.indexedCollection, {
       filter: {
         must: [{ key: "document_id", match: { value: documentId } }],
       },
@@ -276,7 +400,7 @@ class QdrantVectorStore implements VectorStore {
   
   async inspect(limit: number = 10, documentId?: number): Promise<ChunkInfo[]> {
     if (!this.client) {
-      throw new Error("Vector store not initialized. Call initialize() first.");
+      return [];
     }
     
     const results = await this.client.scroll(this.collection, {
@@ -290,15 +414,93 @@ class QdrantVectorStore implements VectorStore {
       chunk_id: point.payload?.chunk_id || String(point.id),
       document_id: point.payload?.document_id,
       title: point.payload?.title || "",
-      content_preview: ((point.payload?.content as string) || "").substring(0, 200) + (((point.payload?.content as string) || "").length > 200 ? "..." : ""),
+      content_preview: ((point.payload?.content as string) || "").substring(0, 200),
       source: point.payload?.source || "",
       page: point.payload?.page || null,
       created: point.payload?.created || null,
     }));
   }
+
+  async getSyncStatus(): Promise<SyncStatus> {
+    if (!this.client) {
+      return { total_indexed: 0, documents: [], last_sync: null };
+    }
+    
+    const results = await this.client.scroll(this.indexedCollection, { limit: 10000 });
+    
+    const documents: IndexedDocument[] = results.points.map((point: any) => ({
+      document_id: point.payload?.document_id,
+      last_modified: point.payload?.last_modified || "",
+      indexed_at: point.payload?.indexed_at || "",
+      chunk_count: point.payload?.chunk_count || 0,
+    }));
+    
+    const lastSync = documents.length > 0 
+      ? documents.reduce((latest, doc) => doc.indexed_at > latest ? doc.indexed_at : latest, documents[0].indexed_at)
+      : null;
+    
+    return {
+      total_indexed: documents.length,
+      documents,
+      last_sync: lastSync,
+    };
+  }
+
+  async getDocumentsNeedingSync(documents: Array<{ id: number; modified: string }>): Promise<number[]> {
+    if (!this.client) {
+      return documents.map(d => d.id);
+    }
+    
+    const results = await this.client.scroll(this.indexedCollection, { limit: 10000 });
+    const indexed = new Map<number, { last_modified: string }>();
+    
+    results.points.forEach((point: any) => {
+      indexed.set(point.payload?.document_id, { last_modified: point.payload?.last_modified });
+    });
+    
+    const needsSync: number[] = [];
+    
+    for (const doc of documents) {
+      const existing = indexed.get(doc.id);
+      if (!existing) {
+        needsSync.push(doc.id);
+      } else if (doc.modified > existing.last_modified) {
+        needsSync.push(doc.id);
+      }
+    }
+    
+    return needsSync;
+  }
+
+  async markDocumentsIndexed(documentId: number, lastModified: string, chunkCount: number): Promise<void> {
+    if (!this.client) {
+      return;
+    }
+    
+    const indexedAt = new Date().toISOString();
+    
+    // Delete existing
+    await this.client.delete(this.indexedCollection, {
+      filter: { must: [{ key: "document_id", match: { value: documentId } }] },
+    });
+    
+    // Add new entry
+    await this.client.upsert(this.indexedCollection, {
+      points: [{
+        id: `doc_${documentId}`,
+        vector: [1],  // Dummy vector
+        payload: {
+          document_id: documentId,
+          last_modified: lastModified,
+          indexed_at: indexedAt,
+          chunk_count: chunkCount,
+        },
+      }],
+    });
+  }
 }
 
-// Factory function to create the appropriate vector store
+// Factory function
 let vectorStore: VectorStore | null = null;
 
 export async function getVectorStore(): Promise<VectorStore> {
