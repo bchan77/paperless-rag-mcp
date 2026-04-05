@@ -1,10 +1,19 @@
-import { getVectorStore, getStorageModeLabel } from "../vector-store.js";
+import { getVectorStore, getStorageModeLabel, type DocumentChunk } from "../vector-store.js";
+import { PaperlessAPI } from "@baruchiro/paperless-mcp/build/api/PaperlessAPI.js";
+import { getConfig } from "../config.js";
+import { embedText, embedTexts, chunkText } from "../embeddings.js";
 import type { Tool } from "./types.js";
 
 /**
  * RAG tools - vector storage and search
  * Uses LanceDB as default, can fall back to Qdrant if configured
  */
+
+// Create Paperless API client using config
+function getPaperlessAPI(): PaperlessAPI {
+  const config = getConfig();
+  return new PaperlessAPI(config.paperlessUrl, config.paperlessToken);
+}
 
 export const ragTools: Tool[] = [
   {
@@ -27,8 +36,6 @@ export const ragTools: Tool[] = [
     },
     handler: async (args: Record<string, unknown>) => {
       // TODO: Implement actual vector search with embeddings
-      // - Embed the query using OpenAI or local embeddings
-      // - Search the vector store
       return {
         message: "rag_query not yet implemented with embeddings",
         query: args.query,
@@ -68,7 +75,7 @@ export const ragTools: Tool[] = [
   },
   {
     name: "rag_sync",
-    description: "Sync documents from Paperless to the vector store",
+    description: "Sync documents from Paperless to the vector store. Indexes documents with embeddings for RAG.",
     inputSchema: {
       type: "object",
       properties: {
@@ -82,15 +89,158 @@ export const ragTools: Tool[] = [
           description: "Force re-indexing even if already indexed",
           default: false,
         },
+        chunk_size: {
+          type: "number",
+          description: "Maximum chunk size in characters",
+          default: 500,
+        },
       },
     },
     handler: async (args: Record<string, unknown>) => {
-      // TODO: Implement actual sync with Unstructured + embeddings
-      return {
-        message: "rag_sync not yet implemented - need to implement embeddings first",
-        synced_count: 0,
-        storage_mode: getStorageModeLabel(),
-      };
+      const startTime = Date.now();
+      const config = getConfig();
+      const store = await getVectorStore();
+      const paperless = getPaperlessAPI();
+      
+      console.error("[rag_sync] Starting document sync...");
+      console.error(`[rag_sync] Storage mode: ${getStorageModeLabel()}`);
+      console.error(`[rag_sync] Chunk size: ${args.chunk_size || 500} characters`);
+      
+      try {
+        // Step 1: Get documents from Paperless
+        console.error("[rag_sync] Fetching documents from Paperless...");
+        let documents;
+        
+        if (args.document_ids && Array.isArray(args.document_ids) && args.document_ids.length > 0) {
+          // Fetch specific documents
+          documents = [];
+          for (const docId of args.document_ids) {
+            try {
+              const doc = await paperless.getDocument(docId as number);
+              documents.push(doc);
+            } catch (err) {
+              console.error(`[rag_sync] Failed to fetch document ${docId}: ${err}`);
+            }
+          }
+          console.error(`[rag_sync] Fetched ${documents.length} specific documents`);
+        } else {
+          // Fetch all documents
+          const response = await paperless.getDocuments();
+          documents = response.results;
+          console.error(`[rag_sync] Fetched ${documents.length} documents from Paperless`);
+        }
+        
+        if (documents.length === 0) {
+          console.error("[rag_sync] No documents to sync");
+          return {
+            status: "completed",
+            documents_processed: 0,
+            chunks_created: 0,
+            time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
+          };
+        }
+        
+        // Step 2: Process documents and create chunks
+        console.error("[rag_sync] Processing documents and creating chunks...");
+        const chunks: DocumentChunk[] = [];
+        const chunkSize = (args.chunk_size as number) || 500;
+        
+        for (let i = 0; i < documents.length; i++) {
+          const doc = documents[i];
+          
+          // Get document content (may be null for some docs)
+          const content = doc.content || "";
+          
+          if (!content.trim()) {
+            console.error(`[rag_sync] Document ${doc.id} (${doc.title || 'untitled'}) - skipping (no content)`);
+            continue;
+          }
+          
+          // Chunk the document
+          const textChunks = chunkText(content, chunkSize);
+          console.error(`[rag_sync] Document ${doc.id} (${doc.title || 'untitled'}) - ${textChunks.length} chunks`);
+          
+          // Create chunks with metadata
+          for (let j = 0; j < textChunks.length; j++) {
+            chunks.push({
+              id: `${doc.id}-chunk-${j}`,
+              documentId: doc.id,
+              content: textChunks[j],
+              metadata: {
+                title: doc.title || `Document ${doc.id}`,
+                source: config.paperlessUrl,
+                page: j + 1,
+                created: doc.created,
+              },
+            });
+          }
+        }
+        
+        console.error(`[rag_sync] Created ${chunks.length} total chunks from ${documents.length} documents`);
+        
+        if (chunks.length === 0) {
+          console.error("[rag_sync] No chunks to index");
+          return {
+            status: "completed",
+            documents_processed: documents.length,
+            chunks_created: 0,
+            time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
+          };
+        }
+        
+        // Step 3: Generate embeddings
+        console.error("[rag_sync] Generating embeddings (this may take a while)...");
+        const contents = chunks.map(c => c.content);
+        
+        let embeddings: number[][];
+        try {
+          embeddings = await embedTexts(contents, (current, total) => {
+            if (current % 10 === 0 || current === total) {
+              console.error(`[rag_sync] Embedding progress: ${current}/${total} (${Math.round(current/total*100)}%)`);
+            }
+          });
+        } catch (err) {
+          console.error(`[rag_sync] ERROR generating embeddings: ${err}`);
+          throw err;
+        }
+        
+        console.error("[rag_sync] Embeddings generated successfully");
+        
+        // Step 4: Add embeddings to chunks
+        for (let i = 0; i < chunks.length; i++) {
+          chunks[i].embedding = embeddings[i];
+        }
+        
+        // Step 5: Store in vector database
+        console.error("[rag_sync] Storing chunks in vector database...");
+        await store.addDocuments(chunks);
+        
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.error(`[rag_sync] === SYNC COMPLETED ===`);
+        console.error(`[rag_sync] Documents processed: ${documents.length}`);
+        console.error(`[rag_sync] Chunks created: ${chunks.length}`);
+        console.error(`[rag_sync] Time elapsed: ${elapsed}s`);
+        
+        return {
+          status: "completed",
+          documents_processed: documents.length,
+          chunks_created: chunks.length,
+          time_seconds: parseFloat(elapsed),
+        };
+        
+      } catch (error) {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.error(`[rag_sync] ERROR: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`[rag_sync] Failed after ${elapsed}s`);
+        
+        return {
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+          documents_processed: 0,
+          chunks_created: 0,
+          time_seconds: parseFloat(elapsed),
+        };
+      }
     },
   },
   {
