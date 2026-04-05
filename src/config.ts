@@ -35,7 +35,7 @@ export function loadConfig(): Config {
   const errors: ConfigError[] = [];
 
   const paperlessUrl = process.env.PAPERLESS_URL;
-  const paperlessToken = process.env.PAPERLESS_API_KEY;
+  const paperlessToken = process.env.PAPERLESS_TOKEN;
   const qdrantUrl = process.env.QDRANT_URL;
   const qdrantCollection = process.env.QDRANT_COLLECTION || "paperless_documents";
   const lancedbPath = process.env.LANCEDB_PATH || "./data/lancedb";
