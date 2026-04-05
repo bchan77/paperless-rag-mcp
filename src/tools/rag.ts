@@ -127,7 +127,7 @@ export const ragTools: Tool[] = [
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of documents to show",
+          description: "Maximum number of chunks to show",
           default: 10,
         },
         document_id: {
@@ -140,18 +140,20 @@ export const ragTools: Tool[] = [
       try {
         const store = await getVectorStore();
         const stats = await store.stats();
+        const limit = (args.limit as number) || 10;
+        const documentId = args.document_id as number | undefined;
         
-        // For now, just return stats and config info
-        // Real debug would need direct LanceDB/Qdrant query access
+        const chunks = await store.inspect(limit, documentId);
+        
         return {
           storage_mode: stats.storageMode,
           total_indexed_chunks: stats.count,
+          chunks,
           config: {
             lancedb_path: process.env.LANCEDB_PATH || "./data/lancedb",
             qdrant_url: process.env.QDRANT_URL || null,
             qdrant_collection: process.env.QDRANT_COLLECTION || "paperless_documents",
           },
-          note: "Detailed chunk inspection requires direct database access",
         };
       } catch (error) {
         return {

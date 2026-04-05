@@ -29,6 +29,16 @@ export interface SearchResult {
   score?: number;
 }
 
+export interface ChunkInfo {
+  chunk_id: string;
+  document_id: number;
+  title: string;
+  content_preview: string;
+  source: string;
+  page: number | null;
+  created: string | null;
+}
+
 export interface VectorStore {
   /**
    * Initialize the vector store (create tables/collections if needed)
@@ -54,6 +64,11 @@ export interface VectorStore {
    * Get stats about the vector store
    */
   stats(): Promise<{ count: number; storageMode: "qdrant" | "lancedb" }>;
+  
+  /**
+   * Inspect chunks (for debugging)
+   */
+  inspect(limit?: number, documentId?: number): Promise<ChunkInfo[]>;
 }
 
 // LanceDB implementation
@@ -161,6 +176,30 @@ class LanceDBVectorStore implements VectorStore {
     const count = await this.table.countRows();
     return { count, storageMode: "lancedb" };
   }
+  
+  async inspect(limit: number = 10, documentId?: number): Promise<ChunkInfo[]> {
+    if (!this.table) {
+      throw new Error("Vector store not initialized. Call initialize() first.");
+    }
+    
+    let query = this.table.query().select(["chunk_id", "document_id", "title", "content", "source", "page", "created"]);
+    
+    if (documentId !== undefined) {
+      query = query.where(`document_id = ${documentId}`);
+    }
+    
+    const results = await query.limit(limit).toArray();
+    
+    return results.map((row: any) => ({
+      chunk_id: row.chunk_id,
+      document_id: row.document_id,
+      title: row.title,
+      content_preview: (row.content || "").substring(0, 200) + ((row.content || "").length > 200 ? "..." : ""),
+      source: row.source,
+      page: row.page || null,
+      created: row.created || null,
+    }));
+  }
 }
 
 // Qdrant implementation
@@ -253,6 +292,29 @@ class QdrantVectorStore implements VectorStore {
     
     const info = await this.client.getCollection(this.collection);
     return { count: info.points_count || 0, storageMode: "qdrant" };
+  }
+  
+  async inspect(limit: number = 10, documentId?: number): Promise<ChunkInfo[]> {
+    if (!this.client) {
+      throw new Error("Vector store not initialized. Call initialize() first.");
+    }
+    
+    const results = await this.client.scroll(this.collection, {
+      limit,
+      filter: documentId !== undefined ? {
+        must: [{ key: "document_id", match: { value: documentId } }],
+      } : undefined,
+    });
+    
+    return results.points.map((point: any) => ({
+      chunk_id: point.payload?.chunk_id || String(point.id),
+      document_id: point.payload?.document_id,
+      title: point.payload?.title || "",
+      content_preview: ((point.payload?.content as string) || "").substring(0, 200) + (((point.payload?.content as string) || "").length > 200 ? "..." : ""),
+      source: point.payload?.source || "",
+      page: point.payload?.page || null,
+      created: point.payload?.created || null,
+    }));
   }
 }
 
