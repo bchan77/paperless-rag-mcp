@@ -130,17 +130,10 @@ class LanceDBVectorStore implements VectorStore {
       this.table = await this.db.openTable("documents");
     }
     
-    // Open or create indexed_documents tracking table
+    // Open indexed_documents tracking table if it exists
+    // Table will be created on first markDocumentsIndexed call with actual data
     if (tableNames.includes("indexed_documents")) {
       this.indexedTable = await this.db.openTable("indexed_documents");
-    } else {
-      // Create tracking table
-      this.indexedTable = await this.db.createTable("indexed_documents", [
-        { name: "document_id", type: "int32" },
-        { name: "last_modified", type: "string" },
-        { name: "indexed_at", type: "string" },
-        { name: "chunk_count", type: "int32" },
-      ]);
     }
   }
   
@@ -178,12 +171,12 @@ class LanceDBVectorStore implements VectorStore {
   }
   
   async deleteDocument(documentId: number): Promise<void> {
-    if (!this.table || !this.indexedTable) {
-      return;
+    if (this.table) {
+      await this.table.delete(`document_id = ${documentId}`);
     }
-
-    await this.table.delete(`document_id = ${documentId}`);
-    await this.indexedTable.delete(`document_id = ${documentId}`);
+    if (this.indexedTable) {
+      await this.indexedTable.delete(`document_id = ${documentId}`);
+    }
   }
   
   async stats(): Promise<{ count: number; storageMode: "qdrant" | "lancedb" }> {
@@ -273,24 +266,26 @@ class LanceDBVectorStore implements VectorStore {
   }
 
   async markDocumentsIndexed(documentId: number, lastModified: string, chunkCount: number): Promise<void> {
-    if (!this.indexedTable) {
-      return;
+    if (!this.db) {
+      throw new Error("Vector store not initialized. Call initialize() first.");
     }
-    
+
     const indexedAt = new Date().toISOString();
-    
-    // Delete existing entry if any
-    await this.indexedTable.delete(`document_id = ${documentId}`);
-    
-    // Add new entry
-    const rows = [{
+    const row = {
       document_id: documentId,
       last_modified: lastModified,
       indexed_at: indexedAt,
       chunk_count: chunkCount,
-    }];
-    
-    await this.indexedTable.add(rows as any);
+    };
+
+    if (!this.indexedTable) {
+      // Create table with first entry - LanceDB infers schema from data
+      this.indexedTable = await this.db.createTable("indexed_documents", [row]);
+    } else {
+      // Delete existing entry if any, then add new one
+      await this.indexedTable.delete(`document_id = ${documentId}`);
+      await this.indexedTable.add([row]);
+    }
   }
 }
 
