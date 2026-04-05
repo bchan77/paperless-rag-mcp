@@ -5,7 +5,7 @@ import { embedTexts, chunkText } from "../embeddings.js";
 import { createSyncJob, getJob, updateJobProgress, completeJob, failJob, listJobs } from "../jobs.js";
 import { log } from "../logger.js";
 import { spawn } from "child_process";
-import { readFileSync, existsSync, openSync, mkdirSync } from "fs";
+import { readFileSync, existsSync, openSync, mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { fileURLToPath } from "url";
 import type { Tool } from "./types.js";
@@ -49,6 +49,46 @@ function spawnSyncWorker(force: boolean): boolean {
   } catch (err) {
     log("error", `[rag_sync] Failed to spawn worker: ${err}`);
     return false;
+  }
+}
+
+/**
+ * Kill the running sync worker process
+ */
+function killSyncWorker(): { success: boolean; message: string } {
+  try {
+    if (!existsSync(PID_FILE)) {
+      return { success: false, message: "No PID file found. Worker may not be running." };
+    }
+
+    const pid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
+    
+    if (isNaN(pid)) {
+      return { success: false, message: "Invalid PID in file." };
+    }
+
+    try {
+      process.kill(pid, "SIGTERM");
+      log("info", `[rag_sync_kill] Sent SIGTERM to PID ${pid}`);
+      
+      // Clean up PID file
+      unlinkSync(PID_FILE);
+      log("info", `[rag_sync_kill] Removed PID file`);
+      
+      return { success: true, message: `Sent SIGTERM to worker process (PID: ${pid})` };
+    } catch (err: any) {
+      if (err.code === "ESRCH") {
+        // Process doesn't exist
+        log("info", `[rag_sync_kill] Process ${pid} not found, cleaning up PID file`);
+        unlinkSync(PID_FILE);
+        return { success: true, message: "Worker process was already dead. PID file cleaned up." };
+      }
+      throw err;
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log("error", `[rag_sync_kill] Failed to kill worker: ${msg}`);
+    return { success: false, message: `Failed to kill worker: ${msg}` };
   }
 }
 
@@ -474,6 +514,14 @@ export const ragTools: Tool[] = [
       } catch (error) {
         return { status: "error", error: error instanceof Error ? error.message : String(error) };
       }
+    },
+  },
+  {
+    name: "rag_sync_kill",
+    description: "Kill the running sync worker process. Use this to stop a background sync that was started with rag_sync.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
+      return killSyncWorker();
     },
   },
 ];
