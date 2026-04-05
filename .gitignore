@@ -3,6 +3,7 @@ dist/
 .env
 *.log
 data/
+logs/
 .DS_Store
 *.local
 .idea

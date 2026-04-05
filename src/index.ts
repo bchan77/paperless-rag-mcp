@@ -8,6 +8,29 @@ import {
 import { initConfig } from "./config.js";
 import { paperlessTools } from "./tools/paperless.js";
 import { ragTools } from "./tools/rag.js";
+import { log } from "./logger.js";
+
+// Crash detection
+process.on("uncaughtException", (err) => {
+  log("error", `[CRASH] Uncaught exception: ${err.message}\n${err.stack}`);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  log("error", `[CRASH] Unhandled rejection: ${reason}`);
+});
+
+process.on("exit", (code) => {
+  log("info", `[PROCESS] Exiting with code ${code}`);
+});
+
+process.on("SIGTERM", () => {
+  log("info", `[PROCESS] Received SIGTERM`);
+});
+
+process.on("SIGINT", () => {
+  log("info", `[PROCESS] Received SIGINT`);
+});
 
 // Read package.json for name and version
 const require = createRequire(import.meta.url);
