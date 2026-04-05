@@ -1,19 +1,341 @@
 import { getVectorStore, getStorageModeLabel } from "../vector-store.js";
 import { PaperlessAPI } from "@baruchiro/paperless-mcp/build/api/PaperlessAPI.js";
 import { getConfig } from "../config.js";
-import { embedText, embedTexts, chunkText } from "../embeddings.js";
+import { embedTexts, chunkText } from "../embeddings.js";
+import { createSyncJob, getJob, updateJobProgress, completeJob, failJob, listJobs } from "../jobs.js";
+import { log } from "../logger.js";
+import { spawn } from "child_process";
+import { readFileSync, existsSync, openSync, mkdirSync } from "fs";
+import { join } from "path";
+import { fileURLToPath } from "url";
 import type { Tool } from "./types.js";
+
+const STATUS_FILE = "./data/sync-status.json";
+const PID_FILE = "./data/sync-worker.pid";
+
+function readSyncStatus(): any {
+  if (!existsSync(STATUS_FILE)) {
+    return { status: "idle", message: "No sync has been run yet" };
+  }
+  try {
+    return JSON.parse(readFileSync(STATUS_FILE, "utf-8"));
+  } catch {
+    return { status: "error", message: "Failed to read status file" };
+  }
+}
+
+function spawnSyncWorker(force: boolean): boolean {
+  try {
+    const workerPath = join(fileURLToPath(import.meta.url), "../../sync-worker.js");
+    const args = force ? ["--force"] : [];
+
+    // Ensure logs directory exists
+    if (!existsSync("./logs")) {
+      mkdirSync("./logs", { recursive: true });
+    }
+
+    // Redirect stderr to file to capture OOM and other fatal errors
+    const stderrFile = openSync("./logs/sync-worker-stderr.log", "a");
+
+    const child = spawn("node", ["--report-on-fatalerror", workerPath, ...args], {
+      detached: true,
+      stdio: ["ignore", "ignore", stderrFile],
+      env: process.env,
+    });
+
+    child.unref();
+    log("info", `[rag_sync] Spawned sync worker process (PID: ${child.pid})`);
+    return true;
+  } catch (err) {
+    log("error", `[rag_sync] Failed to spawn worker: ${err}`);
+    return false;
+  }
+}
 
 /**
  * RAG tools - vector storage and search
- * Uses LanceDB as default, can fall back to Qdrant if configured
- * Supports delta sync - only indexes new/modified documents
+ * Uses LanceDB by default, can fall back to Qdrant if configured
+ * Supports delta sync and background jobs for large document sets
  */
 
-// Create Paperless API client using config
 function getPaperlessAPI(): PaperlessAPI {
   const config = getConfig();
   return new PaperlessAPI(config.paperlessUrl, config.paperlessToken);
+}
+
+// Fetch all documents with pagination
+async function fetchAllDocuments(
+  paperless: PaperlessAPI,
+  onProgress?: (fetched: number, total: number) => void
+): Promise<any[]> {
+  const allDocs: any[] = [];
+  const pageSize = 100;
+  let page = 1;
+  let totalCount = 0;
+
+  log("info", `[fetchAllDocuments] Starting pagination fetch...`);
+
+  // First request to get total count
+  const firstResponse = await paperless.getDocuments(`?page=1&page_size=${pageSize}`);
+  totalCount = firstResponse.count;
+  allDocs.push(...firstResponse.results);
+
+  log("info", `[fetchAllDocuments] Total documents in Paperless: ${totalCount}`);
+  log("info", `[fetchAllDocuments] Fetched page 1: ${allDocs.length}/${totalCount}`);
+
+  if (onProgress) {
+    onProgress(allDocs.length, totalCount);
+  }
+
+  // Fetch remaining pages
+  while (allDocs.length < totalCount) {
+    page++;
+    const response = await paperless.getDocuments(`?page=${page}&page_size=${pageSize}`);
+    allDocs.push(...response.results);
+
+    log("info", `[fetchAllDocuments] Fetched page ${page}: ${allDocs.length}/${totalCount}`);
+
+    if (onProgress) {
+      onProgress(allDocs.length, totalCount);
+    }
+
+    // Safety check in case API returns empty results
+    if (response.results.length === 0) {
+      break;
+    }
+  }
+
+  log("info", `[fetchAllDocuments] Complete. Total fetched: ${allDocs.length}`);
+  return allDocs;
+}
+
+// Sync worker
+async function runSyncInBackground(
+  jobId: string,
+  options: {
+    document_ids?: number[];
+    force?: boolean;
+    chunk_size?: number;
+    limit?: number;
+  }
+): Promise<void> {
+  const startTime = Date.now();
+  const config = getConfig();
+  const store = await getVectorStore();
+  const paperless = getPaperlessAPI();
+  const chunkSize = options.chunk_size || 500;
+  
+  try {
+    updateJobProgress(jobId, 0, 100, "Fetching documents from Paperless...");
+    
+    let paperlessDocs;
+    
+    try {
+      if (options.document_ids && options.document_ids.length > 0) {
+        paperlessDocs = [];
+        for (const docId of options.document_ids) {
+          try {
+            const doc = await paperless.getDocument(docId);
+            paperlessDocs.push(doc);
+          } catch (err) {
+            log("error", `[rag_sync:${jobId}] Failed to fetch document ${docId}`);
+          }
+        }
+      } else {
+        paperlessDocs = await fetchAllDocuments(paperless, (fetched, total) => {
+          updateJobProgress(jobId, 0, 100, `Fetching documents from Paperless: ${fetched}/${total}`);
+        });
+      }
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes("401")) {
+        throw new Error(`Paperless API authentication failed (401). Check your PAPERLESS_TOKEN is valid.`);
+      }
+      throw new Error(`Paperless API error: ${errMsg}`);
+    }
+    
+    log("info", `[rag_sync:${jobId}] Fetched ${paperlessDocs.length} documents from Paperless`);
+
+    if (paperlessDocs.length === 0) {
+      log("info", `[rag_sync:${jobId}] No documents to sync`);
+      completeJob(jobId, {
+        status: "completed",
+        documents_processed: 0,
+        chunks_created: 0,
+        documents_skipped: 0,
+        time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
+      });
+      return;
+    }
+
+    let docsToSync: typeof paperlessDocs;
+
+    if (options.force) {
+      docsToSync = paperlessDocs;
+      log("info", `[rag_sync:${jobId}] Force sync: processing all ${docsToSync.length} documents`);
+    } else {
+      log("info", `[rag_sync:${jobId}] Checking which documents need sync (delta sync)...`);
+      const docsWithModTime = paperlessDocs.map(d => ({
+        id: d.id,
+        modified: d.modified || d.created || "",
+      }));
+      const needsSyncIds = await store.getDocumentsNeedingSync(docsWithModTime);
+      docsToSync = paperlessDocs.filter(d => needsSyncIds.includes(d.id));
+      log("info", `[rag_sync:${jobId}] Delta sync: ${docsToSync.length} documents need sync (${paperlessDocs.length - docsToSync.length} already up-to-date)`);
+    }
+
+    if (docsToSync.length === 0) {
+      log("info", `[rag_sync:${jobId}] All documents already up-to-date, nothing to sync`);
+      completeJob(jobId, {
+        status: "completed",
+        documents_processed: 0,
+        chunks_created: 0,
+        documents_skipped: paperlessDocs.length,
+        documents_remaining: 0,
+        time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
+      });
+      return;
+    }
+
+    // Apply limit to batch size
+    const limit = options.limit || 50;
+    const totalNeedingSync = docsToSync.length;
+    if (docsToSync.length > limit) {
+      docsToSync = docsToSync.slice(0, limit);
+      log("info", `[rag_sync:${jobId}] Limiting to ${limit} documents (${totalNeedingSync - limit} remaining for next sync)`);
+    }
+
+    const chunks: any[] = [];
+    const docChunkCounts: Map<number, number> = new Map();
+
+    log("info", `[rag_sync:${jobId}] Starting to chunk ${docsToSync.length} documents...`);
+
+    for (let i = 0; i < docsToSync.length; i++) {
+      const doc = docsToSync[i];
+
+      try {
+        const content = doc.content || "";
+
+        if (!content.trim()) {
+          continue;
+        }
+
+        const textChunks = chunkText(content, chunkSize);
+        docChunkCounts.set(doc.id, textChunks.length);
+
+        for (let j = 0; j < textChunks.length; j++) {
+          chunks.push({
+            id: `${doc.id}-chunk-${j}`,
+            documentId: doc.id,
+            content: textChunks[j],
+            metadata: {
+              title: doc.title || `Document ${doc.id}`,
+              source: config.paperlessUrl,
+              page: j + 1,
+              created: doc.created,
+              modified: doc.modified,
+            },
+          });
+        }
+      } catch (err) {
+        log("error", `[rag_sync:${jobId}] Error processing doc ${doc.id} (${doc.title}): ${err}`);
+        // Continue with next document
+      }
+
+      // Log progress every 50 documents
+      if ((i + 1) % 50 === 0 || i + 1 === docsToSync.length) {
+        log("info", `[rag_sync:${jobId}] Chunking progress: ${i + 1}/${docsToSync.length} docs, ${chunks.length} chunks so far`);
+      }
+
+      updateJobProgress(
+        jobId,
+        Math.round((i + 1) / docsToSync.length * 50),
+        100,
+        `Processing: ${doc.title || `Doc ${doc.id}`} (${i + 1}/${docsToSync.length})`
+      );
+    }
+    
+    log("info", `[rag_sync:${jobId}] Created ${chunks.length} chunks from ${docsToSync.length} documents`);
+
+    if (chunks.length === 0) {
+      log("info", `[rag_sync:${jobId}] No chunks created (documents may be empty)`);
+      completeJob(jobId, {
+        status: "completed",
+        documents_processed: docsToSync.length,
+        chunks_created: 0,
+        documents_skipped: paperlessDocs.length - docsToSync.length,
+        time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
+      });
+      return;
+    }
+
+    const contents = chunks.map(c => c.content);
+
+    log("info", `[rag_sync:${jobId}] Starting embedding generation for ${contents.length} chunks...`);
+    try {
+      for (let i = 0; i < contents.length; i += 10) {
+        const batch = contents.slice(i, i + 10);
+        const batchEmbeddings = await embedTexts(batch);
+
+        for (let j = 0; j < batchEmbeddings.length; j++) {
+          chunks[i + j].embedding = batchEmbeddings[j];
+        }
+
+        if ((i + batch.length) % 100 === 0 || i + batch.length === contents.length) {
+          log("info", `[rag_sync:${jobId}] Embeddings: ${Math.min(i + batch.length, contents.length)}/${contents.length}`);
+        }
+
+        updateJobProgress(
+          jobId,
+          50 + Math.round((i + batch.length) / contents.length * 40),
+          100,
+          `Generating embeddings: ${Math.min(i + batch.length, contents.length)}/${contents.length}`
+        );
+      }
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes("401")) {
+        throw new Error(`OpenAI API authentication failed (401). Check your OPENAI_API_KEY is valid.`);
+      }
+      throw new Error(`OpenAI API error: ${errMsg}`);
+    }
+
+    log("info", `[rag_sync:${jobId}] Storing chunks in vector database...`);
+    if (!options.force) {
+      for (const docId of docsToSync.map(d => d.id)) {
+        await store.deleteDocument(docId);
+      }
+    }
+
+    await store.addDocuments(chunks);
+
+    for (const doc of docsToSync) {
+      const chunkCount = docChunkCounts.get(doc.id) || 0;
+      await store.markDocumentsIndexed(
+        doc.id,
+        doc.modified || doc.created || new Date().toISOString(),
+        chunkCount
+      );
+    }
+
+    updateJobProgress(jobId, 100, 100, "Completed");
+
+    const documentsRemaining = totalNeedingSync - docsToSync.length;
+    log("info", `[rag_sync:${jobId}] Sync completed: ${docsToSync.length} docs, ${chunks.length} chunks, ${((Date.now() - startTime) / 1000).toFixed(2)}s. Remaining: ${documentsRemaining}`);
+    completeJob(jobId, {
+      status: "completed",
+      documents_processed: docsToSync.length,
+      chunks_created: chunks.length,
+      documents_skipped: paperlessDocs.length - totalNeedingSync,
+      documents_remaining: documentsRemaining,
+      time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
+      message: documentsRemaining > 0 ? `Run rag_sync again to process ${documentsRemaining} more documents` : "All documents synced",
+    });
+    
+  } catch (error) {
+    log("error", `[rag_sync:${jobId}] Error: ${error}`);
+    failJob(jobId, error instanceof Error ? error.message : String(error));
+  }
 }
 
 export const ragTools: Tool[] = [
@@ -23,384 +345,134 @@ export const ragTools: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        query: {
-          type: "string",
-          description: "The search query in natural language",
-        },
-        limit: {
-          type: "number",
-          description: "Maximum number of results to return",
-          default: 5,
-        },
+        query: { type: "string" },
+        limit: { type: "number", default: 5 },
       },
       required: ["query"],
     },
-    handler: async (args: Record<string, unknown>) => {
-      // TODO: Implement actual vector search with embeddings
-      return {
-        message: "rag_query not yet implemented with embeddings",
-        query: args.query,
-        results: [],
-        storage_mode: getStorageModeLabel(),
-        note: "Embeddings need to be implemented first",
-      };
-    },
+    handler: async (args) => ({
+      message: "rag_query not yet implemented with embeddings",
+      query: args.query,
+      results: [],
+      storage_mode: getStorageModeLabel(),
+    }),
   },
   {
     name: "rag_summarize",
-    description: "Summarize a document or set of documents",
+    description: "Summarize a document",
     inputSchema: {
       type: "object",
       properties: {
-        document_id: {
-          type: "number",
-          description: "Document ID from Paperless",
-        },
-        max_length: {
-          type: "number",
-          description: "Maximum summary length in words",
-          default: 200,
-        },
+        document_id: { type: "number" },
+        max_length: { type: "number", default: 200 },
       },
       required: ["document_id"],
     },
-    handler: async (args: Record<string, unknown>) => {
-      // TODO: Implement actual summarization with LLM
-      return {
-        message: "rag_summarize not yet implemented",
-        document_id: args.document_id,
-        summary: "",
-        storage_mode: getStorageModeLabel(),
-      };
-    },
+    handler: async (args) => ({
+      message: "rag_summarize not yet implemented",
+      document_id: args.document_id,
+      summary: "",
+      storage_mode: getStorageModeLabel(),
+    }),
   },
   {
     name: "rag_sync",
-    description: "Sync documents from Paperless to the vector store. Uses delta sync - only indexes new or modified documents.",
+    description: "Start syncing all documents from Paperless to vector store. Runs as background process. Use rag_sync_status to check progress.",
     inputSchema: {
       type: "object",
       properties: {
-        document_ids: {
-          type: "array",
-          items: { type: "number" },
-          description: "Specific document IDs to sync, or omit to sync all (uses delta sync)",
-        },
-        force: {
-          type: "boolean",
-          description: "Force re-indexing of ALL documents (ignore delta sync)",
-          default: false,
-        },
-        chunk_size: {
-          type: "number",
-          description: "Maximum chunk size in characters",
-          default: 500,
-        },
+        force: { type: "boolean", default: false, description: "Re-sync all documents even if already indexed" },
       },
     },
-    handler: async (args: Record<string, unknown>) => {
-      const startTime = Date.now();
-      const config = getConfig();
-      const store = await getVectorStore();
-      const paperless = getPaperlessAPI();
-      
-      console.error("[rag_sync] Starting document sync...");
-      console.error(`[rag_sync] Storage mode: ${getStorageModeLabel()}`);
-      console.error(`[rag_sync] Chunk size: ${args.chunk_size || 500} characters`);
-      
-      if (args.force) {
-        console.error("[rag_sync] Force mode: RE-INDEXING all documents");
-      }
-      
-      try {
-        // Step 1: Get all documents from Paperless with modification times
-        console.error("[rag_sync] Fetching documents from Paperless...");
-        let paperlessDocs;
-        
-        if (args.document_ids && Array.isArray(args.document_ids) && args.document_ids.length > 0) {
-          // Fetch specific documents
-          paperlessDocs = [];
-          for (const docId of args.document_ids as number[]) {
-            try {
-              const doc = await paperless.getDocument(docId);
-              paperlessDocs.push(doc);
-            } catch (err) {
-              console.error(`[rag_sync] Failed to fetch document ${docId}: ${err}`);
-            }
-          }
-          console.error(`[rag_sync] Fetched ${paperlessDocs.length} specific documents`);
-        } else {
-          // Fetch all documents
-          const response = await paperless.getDocuments();
-          paperlessDocs = response.results;
-          console.error(`[rag_sync] Fetched ${paperlessDocs.length} total documents from Paperless`);
-        }
-        
-        if (paperlessDocs.length === 0) {
-          console.error("[rag_sync] No documents to sync");
-          return {
-            status: "completed",
-            documents_processed: 0,
-            chunks_created: 0,
-            documents_skipped: 0,
-            time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
-          };
-        }
-        
-        // Step 2: Determine which documents need syncing (delta sync)
-        let docsToSync: typeof paperlessDocs;
-        
-        if (args.force) {
-          docsToSync = paperlessDocs;
-          console.error(`[rag_sync] Force mode: will re-index all ${docsToSync.length} documents`);
-        } else {
-          // Delta sync - check which docs are new or modified
-          const docsWithModTime = paperlessDocs.map(d => ({
-            id: d.id,
-            modified: d.modified || d.created || "",
-          }));
-          
-          const needsSyncIds = await store.getDocumentsNeedingSync(docsWithModTime);
-          docsToSync = paperlessDocs.filter(d => needsSyncIds.includes(d.id));
-          
-          const skipped = paperlessDocs.length - docsToSync.length;
-          console.error(`[rag_sync] Delta sync: ${docsToSync.length} need update, ${skipped} are up-to-date`);
-        }
-        
-        if (docsToSync.length === 0) {
-          console.error("[rag_sync] All documents are up-to-date, nothing to sync");
-          return {
-            status: "completed",
-            documents_processed: 0,
-            chunks_created: 0,
-            documents_skipped: paperlessDocs.length,
-            time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
-          };
-        }
-        
-        // Step 3: Process documents and create chunks
-        console.error("[rag_sync] Processing documents and creating chunks...");
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const chunks: any[] = [];
-        const chunkSize = (args.chunk_size as number) || 500;
-        const docChunkCounts: Map<number, number> = new Map();
-        
-        for (let i = 0; i < docsToSync.length; i++) {
-          const doc = docsToSync[i];
-          
-          // Get document content
-          const content = doc.content || "";
-          
-          if (!content.trim()) {
-            console.error(`[rag_sync] Document ${doc.id} (${doc.title || 'untitled'}) - skipping (no content)`);
-            continue;
-          }
-          
-          // Chunk the document
-          const textChunks = chunkText(content, chunkSize);
-          docChunkCounts.set(doc.id, textChunks.length);
-          console.error(`[rag_sync] [${i + 1}/${docsToSync.length}] ${doc.title || `Doc ${doc.id}`} - ${textChunks.length} chunks`);
-          
-          // Create chunks with metadata
-          for (let j = 0; j < textChunks.length; j++) {
-            chunks.push({
-              id: `${doc.id}-chunk-${j}`,
-              documentId: doc.id,
-              content: textChunks[j],
-              metadata: {
-                title: doc.title || `Document ${doc.id}`,
-                source: config.paperlessUrl,
-                page: j + 1,
-                created: doc.created,
-                modified: doc.modified,
-              },
-            } as any);
-          }
-        }
-        
-        console.error(`[rag_sync] Created ${chunks.length} total chunks from ${docsToSync.length} documents`);
-        
-        if (chunks.length === 0) {
-          console.error("[rag_sync] No chunks to index");
-          return {
-            status: "completed",
-            documents_processed: docsToSync.length,
-            chunks_created: 0,
-            documents_skipped: paperlessDocs.length - docsToSync.length,
-            time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
-          };
-        }
-        
-        // Step 4: Generate embeddings
-        console.error("[rag_sync] Generating embeddings...");
-        const contents = chunks.map((c: any) => c.content);
-        
-        let embeddings: number[][];
-        try {
-          embeddings = await embedTexts(contents, (current, total) => {
-            if (current % 10 === 0 || current === total) {
-              const pct = Math.round(current / total * 100);
-              console.error(`[rag_sync] Embedding: ${current}/${total} (${pct}%)`);
-            }
-          });
-        } catch (err) {
-          console.error(`[rag_sync] ERROR generating embeddings: ${err}`);
-          throw err;
-        }
-        
-        // Step 5: Add embeddings to chunks
-        for (let i = 0; i < chunks.length; i++) {
-          (chunks[i] as any).embedding = embeddings[i];
-        }
-        
-        // Step 6: Delete old chunks for docs being re-indexed
-        if (!args.force) {
-          console.error("[rag_sync] Removing old chunks for re-indexed documents...");
-          for (const docId of docsToSync.map(d => d.id)) {
-            await store.deleteDocument(docId);
-          }
-        }
-        
-        // Step 7: Store in vector database
-        console.error("[rag_sync] Storing chunks in vector database...");
-        await store.addDocuments(chunks);
-        
-        // Step 8: Mark documents as indexed
-        console.error("[rag_sync] Updating sync tracking...");
-        for (const doc of docsToSync) {
-          const chunkCount = docChunkCounts.get(doc.id) || 0;
-          await store.markDocumentsIndexed(doc.id, doc.modified || doc.created || new Date().toISOString(), chunkCount);
-        }
-        
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.error(`[rag_sync] === SYNC COMPLETED ===`);
-        console.error(`[rag_sync] Documents processed: ${docsToSync.length}`);
-        console.error(`[rag_sync] Chunks created: ${chunks.length}`);
-        console.error(`[rag_sync] Documents skipped (up-to-date): ${paperlessDocs.length - docsToSync.length}`);
-        console.error(`[rag_sync] Time elapsed: ${elapsed}s`);
-        
+    handler: async (args) => {
+      // Check if sync is already running
+      const currentStatus = readSyncStatus();
+      if (currentStatus.status === "running") {
         return {
-          status: "completed",
-          documents_processed: docsToSync.length,
-          chunks_created: chunks.length,
-          documents_skipped: paperlessDocs.length - docsToSync.length,
-          time_seconds: parseFloat(elapsed),
+          status: "already_running",
+          message: "Sync is already in progress. Use rag_sync_status to check progress.",
+          progress: currentStatus.progress,
         };
-        
-      } catch (error) {
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.error(`[rag_sync] ERROR: ${error instanceof Error ? error.message : String(error)}`);
-        
+      }
+
+      const force = args.force as boolean || false;
+      const started = spawnSyncWorker(force);
+
+      if (started) {
+        return {
+          status: "started",
+          message: "Sync started in background. Use rag_sync_status to check progress.",
+        };
+      } else {
         return {
           status: "error",
-          error: error instanceof Error ? error.message : String(error),
-          documents_processed: 0,
-          chunks_created: 0,
-          documents_skipped: 0,
-          time_seconds: parseFloat(elapsed),
+          message: "Failed to start sync worker. Check logs for details.",
         };
       }
     },
   },
   {
     name: "rag_sync_status",
-    description: "Get the status of the vector store sync - shows which documents are indexed and when they were last synced.",
+    description: "Check background sync status. Returns progress and results.",
     inputSchema: {
       type: "object",
       properties: {},
     },
     handler: async () => {
+      return readSyncStatus();
+    },
+  },
+  {
+    name: "rag_sync_status_all",
+    description: "Get status of all documents (shows which are indexed and up-to-date).",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
       try {
         const store = await getVectorStore();
         const syncStatus = await store.getSyncStatus();
-        const stats = await store.stats();
-        
         return {
           storage_mode: getStorageModeLabel(),
           total_indexed_documents: syncStatus.total_indexed,
-          total_chunks: stats.count,
           last_sync: syncStatus.last_sync,
-          indexed_documents: syncStatus.documents.map(d => ({
-            document_id: d.document_id,
-            last_modified: d.last_modified,
-            indexed_at: d.indexed_at,
-            chunk_count: d.chunk_count,
-          })),
+          indexed_documents: syncStatus.documents,
         };
       } catch (error) {
-        return {
-          status: "error",
-          error: error instanceof Error ? error.message : String(error),
-        };
+        return { status: "error", error: error instanceof Error ? error.message : String(error) };
       }
     },
   },
   {
     name: "rag_stats",
-    description: "Get statistics about the vector store",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
+    description: "Get vector store statistics.",
+    inputSchema: { type: "object", properties: {} },
     handler: async () => {
       try {
         const store = await getVectorStore();
         const stats = await store.stats();
-        return {
-          total_documents: stats.count,
-          storage_mode: stats.storageMode,
-          status: "initialized",
-        };
+        return { total_documents: stats.count, storage_mode: stats.storageMode, status: "initialized" };
       } catch (error) {
-        return {
-          total_documents: 0,
-          storage_mode: getStorageModeLabel(),
-          status: "error",
-          error: error instanceof Error ? error.message : String(error),
-        };
+        return { total_documents: 0, storage_mode: getStorageModeLabel(), status: "error", error: error instanceof Error ? error.message : String(error) };
       }
     },
   },
   {
     name: "rag_debug",
-    description: "Debug tool to inspect vector store contents (for development only)",
+    description: "Debug tool to inspect vector store contents.",
     inputSchema: {
       type: "object",
       properties: {
-        limit: {
-          type: "number",
-          description: "Maximum number of chunks to show",
-          default: 10,
-        },
-        document_id: {
-          type: "number",
-          description: "Filter by specific document ID",
-        },
+        limit: { type: "number", default: 10 },
+        document_id: { type: "number" },
       },
     },
-    handler: async (args: Record<string, unknown>) => {
+    handler: async (args) => {
       try {
         const store = await getVectorStore();
         const stats = await store.stats();
-        const limit = (args.limit as number) || 10;
-        const documentId = args.document_id as number | undefined;
-        
-        const chunks = await store.inspect(limit, documentId);
-        
-        return {
-          storage_mode: stats.storageMode,
-          total_indexed_chunks: stats.count,
-          chunks,
-          config: {
-            lancedb_path: process.env.LANCEDB_PATH || "./data/lancedb",
-            qdrant_url: process.env.QDRANT_URL || null,
-            qdrant_collection: process.env.QDRANT_COLLECTION || "paperless_documents",
-          },
-        };
+        const chunks = await store.inspect(args.limit as number, args.document_id as number | undefined);
+        return { storage_mode: stats.storageMode, total_indexed_chunks: stats.count, chunks };
       } catch (error) {
-        return {
-          status: "error",
-          error: error instanceof Error ? error.message : String(error),
-        };
+        return { status: "error", error: error instanceof Error ? error.message : String(error) };
       }
     },
   },
