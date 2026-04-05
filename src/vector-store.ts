@@ -85,58 +85,23 @@ class LanceDBVectorStore implements VectorStore {
   
   async initialize(): Promise<void> {
     this.db = await connect(this.dbPath);
-    
-    // Check if table exists, create if not
+
+    // Check if table exists, open it if so
+    // Table will be created on first addDocuments call with actual data
     const tableNames = await this.db.tableNames();
-    if (!tableNames.includes("documents")) {
-      this.table = await this.db.createTable("documents", [
-        {
-          name: "id",
-          type: "vector",
-          vectorType: "float32",
-          dimension: 1536,
-        },
-        {
-          name: "document_id",
-          type: "int32",
-        },
-        {
-          name: "chunk_id",
-          type: "string",
-        },
-        {
-          name: "content",
-          type: "string",
-        },
-        {
-          name: "title",
-          type: "string",
-        },
-        {
-          name: "source",
-          type: "string",
-        },
-        {
-          name: "page",
-          type: "int32",
-        },
-        {
-          name: "created",
-          type: "string",
-        },
-      ]);
-    } else {
+    if (tableNames.includes("documents")) {
       this.table = await this.db.openTable("documents");
     }
+    // If table doesn't exist, this.table stays null until addDocuments is called
   }
   
   async addDocuments(chunks: DocumentChunk[]): Promise<void> {
-    if (!this.table) {
+    if (!this.db) {
       throw new Error("Vector store not initialized. Call initialize() first.");
     }
-    
+
     const rows = chunks.map((chunk) => ({
-      id: chunk.embedding || new Array(1536).fill(0),
+      vector: chunk.embedding || new Array(1536).fill(0),
       document_id: chunk.documentId,
       chunk_id: chunk.id,
       content: chunk.content,
@@ -145,15 +110,21 @@ class LanceDBVectorStore implements VectorStore {
       page: chunk.metadata.page || 0,
       created: chunk.metadata.created || "",
     }));
-    
-    await this.table.add(rows);
+
+    if (!this.table) {
+      // Create table with first batch of data - LanceDB infers schema from data
+      this.table = await this.db.createTable("documents", rows);
+    } else {
+      await this.table.add(rows);
+    }
   }
   
   async search(queryEmbedding: number[], limit: number = 5): Promise<SearchResult[]> {
     if (!this.table) {
-      throw new Error("Vector store not initialized. Call initialize() first.");
+      // No documents indexed yet
+      return [];
     }
-    
+
     // Note: LanceDB search requires actual vectors
     // For now, return empty results until embeddings are implemented
     console.log("LanceDB search called - embeddings not yet implemented");
@@ -162,9 +133,10 @@ class LanceDBVectorStore implements VectorStore {
   
   async deleteDocument(documentId: number): Promise<void> {
     if (!this.table) {
-      throw new Error("Vector store not initialized. Call initialize() first.");
+      // No documents indexed yet, nothing to delete
+      return;
     }
-    
+
     await this.table.delete(`document_id = ${documentId}`);
   }
   
@@ -179,9 +151,10 @@ class LanceDBVectorStore implements VectorStore {
   
   async inspect(limit: number = 10, documentId?: number): Promise<ChunkInfo[]> {
     if (!this.table) {
-      throw new Error("Vector store not initialized. Call initialize() first.");
+      // No documents indexed yet
+      return [];
     }
-    
+
     // Get all rows - let LanceDB handle the schema
     let results: any[];
     if (documentId !== undefined) {
