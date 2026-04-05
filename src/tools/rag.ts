@@ -1,4 +1,4 @@
-import { getVectorStore, getStorageModeLabel, type DocumentChunk } from "../vector-store.js";
+import { getVectorStore, getStorageModeLabel } from "../vector-store.js";
 import type { Tool } from "./types.js";
 
 /**
@@ -113,6 +113,48 @@ export const ragTools: Tool[] = [
         return {
           total_documents: 0,
           storage_mode: getStorageModeLabel(),
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  },
+  {
+    name: "rag_debug",
+    description: "Debug tool to inspect vector store contents (for development only)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "number",
+          description: "Maximum number of documents to show",
+          default: 10,
+        },
+        document_id: {
+          type: "number",
+          description: "Filter by specific document ID",
+        },
+      },
+    },
+    handler: async (args: Record<string, unknown>) => {
+      try {
+        const store = await getVectorStore();
+        const stats = await store.stats();
+        
+        // For now, just return stats and config info
+        // Real debug would need direct LanceDB/Qdrant query access
+        return {
+          storage_mode: stats.storageMode,
+          total_indexed_chunks: stats.count,
+          config: {
+            lancedb_path: process.env.LANCEDB_PATH || "./data/lancedb",
+            qdrant_url: process.env.QDRANT_URL || null,
+            qdrant_collection: process.env.QDRANT_COLLECTION || "paperless_documents",
+          },
+          note: "Detailed chunk inspection requires direct database access",
+        };
+      } catch (error) {
+        return {
           status: "error",
           error: error instanceof Error ? error.message : String(error),
         };
