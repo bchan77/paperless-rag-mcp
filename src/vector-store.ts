@@ -182,23 +182,30 @@ class LanceDBVectorStore implements VectorStore {
       throw new Error("Vector store not initialized. Call initialize() first.");
     }
     
-    let query = this.table.query().select(["chunk_id", "document_id", "title", "content", "source", "page", "created"]);
-    
+    // Get all rows - let LanceDB handle the schema
+    let results: any[];
     if (documentId !== undefined) {
-      query = query.where(`document_id = ${documentId}`);
+      results = await this.table.query().where(`document_id = ${documentId}`).limit(limit).toArray();
+    } else {
+      results = await this.table.query().limit(limit).toArray();
     }
     
-    const results = await query.limit(limit).toArray();
-    
-    return results.map((row: any) => ({
-      chunk_id: row.chunk_id,
-      document_id: row.document_id,
-      title: row.title,
-      content_preview: (row.content || "").substring(0, 200) + ((row.content || "").length > 200 ? "..." : ""),
-      source: row.source,
-      page: row.page || null,
-      created: row.created || null,
-    }));
+    return results.map((row: any) => {
+      // Handle different possible field names (snake_case vs camelCase)
+      const docId = row.document_id ?? row.documentId ?? row.id;
+      const chunkId = row.chunk_id ?? row.chunkId ?? row.id;
+      const contentField = row.content ?? row.text ?? row.page_content ?? "";
+      
+      return {
+        chunk_id: chunkId,
+        document_id: docId,
+        title: row.title ?? "",
+        content_preview: (contentField || "").substring(0, 200) + ((contentField || "").length > 200 ? "..." : ""),
+        source: row.source ?? "",
+        page: row.page ?? null,
+        created: row.created ?? null,
+      };
+    });
   }
 }
 
