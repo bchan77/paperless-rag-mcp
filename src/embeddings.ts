@@ -36,28 +36,35 @@ export async function embedText(text: string): Promise<number[]> {
 
 /**
  * Generate embeddings for multiple texts (batch processing)
+ * Uses OpenAI's batch API to process multiple texts in a single request
  */
 export async function embedTexts(texts: string[], onProgress?: (current: number, total: number) => void): Promise<number[][]> {
   const client = getOpenAIClient();
   const embeddings: number[][] = [];
-  
-  for (let i = 0; i < texts.length; i++) {
-    const text = texts[i];
-    
-    // Log progress
-    console.error(`[embeddings] Embedding ${i + 1}/${texts.length}`);
+
+  // OpenAI supports up to 2048 inputs per request, but we use smaller batches
+  // to avoid timeouts and memory issues
+  const BATCH_SIZE = 100;
+
+  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+    const batch = texts.slice(i, i + BATCH_SIZE);
+    const batchEnd = Math.min(i + BATCH_SIZE, texts.length);
+
     if (onProgress) {
-      onProgress(i + 1, texts.length);
+      onProgress(batchEnd, texts.length);
     }
-    
+
     const response = await client.embeddings.create({
       model: "text-embedding-3-small",
-      input: text,
+      input: batch,
     });
-    
-    embeddings.push(response.data[0].embedding);
+
+    // OpenAI returns embeddings in the same order as inputs
+    for (const item of response.data) {
+      embeddings.push(item.embedding);
+    }
   }
-  
+
   return embeddings;
 }
 

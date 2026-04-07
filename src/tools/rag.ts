@@ -5,7 +5,7 @@ import { embedTexts, chunkText } from "../embeddings.js";
 import { createSyncJob, getJob, updateJobProgress, completeJob, failJob, listJobs } from "../jobs.js";
 import { log } from "../logger.js";
 import { spawn } from "child_process";
-import { readFileSync, existsSync, openSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, openSync, mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { fileURLToPath } from "url";
 import type { Tool } from "./types.js";
@@ -24,10 +24,25 @@ function readSyncStatus(): any {
   }
 }
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    return err.code !== "ESRCH";
+  }
+}
+
 function spawnSyncWorker(force: boolean): boolean {
   try {
     const workerPath = join(fileURLToPath(import.meta.url), "../../sync-worker.js");
     const args = force ? ["--force"] : [];
+
+    // Ensure data directory exists
+    const dataDir = "./data";
+    if (!existsSync(dataDir)) {
+      mkdirSync(dataDir, { recursive: true });
+    }
 
     // Ensure logs directory exists
     if (!existsSync("./logs")) {
@@ -43,12 +58,57 @@ function spawnSyncWorker(force: boolean): boolean {
       env: process.env,
     });
 
+    if (child.pid) {
+      writeFileSync(PID_FILE, child.pid.toString(), "utf-8");
+      log("info", `[rag_sync] Wrote PID file ${PID_FILE} (PID: ${child.pid})`);
+    }
+
     child.unref();
     log("info", `[rag_sync] Spawned sync worker process (PID: ${child.pid})`);
     return true;
   } catch (err) {
     log("error", `[rag_sync] Failed to spawn worker: ${err}`);
     return false;
+  }
+}
+
+/**
+ * Kill the running sync worker process
+ */
+function killSyncWorker(): { success: boolean; message: string } {
+  try {
+    if (!existsSync(PID_FILE)) {
+      return { success: false, message: "No PID file found. Worker may not be running." };
+    }
+
+    const pid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
+    
+    if (isNaN(pid)) {
+      return { success: false, message: "Invalid PID in file." };
+    }
+
+    try {
+      process.kill(pid, "SIGTERM");
+      log("info", `[rag_sync_kill] Sent SIGTERM to PID ${pid}`);
+      
+      // Clean up PID file
+      unlinkSync(PID_FILE);
+      log("info", `[rag_sync_kill] Removed PID file`);
+      
+      return { success: true, message: `Sent SIGTERM to worker process (PID: ${pid})` };
+    } catch (err: any) {
+      if (err.code === "ESRCH") {
+        // Process doesn't exist
+        log("info", `[rag_sync_kill] Process ${pid} not found, cleaning up PID file`);
+        unlinkSync(PID_FILE);
+        return { success: true, message: "Worker process was already dead. PID file cleaned up." };
+      }
+      throw err;
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log("error", `[rag_sync_kill] Failed to kill worker: ${msg}`);
+    return { success: false, message: `Failed to kill worker: ${msg}` };
   }
 }
 
@@ -385,16 +445,57 @@ export const ragTools: Tool[] = [
       },
     },
     handler: async (args) => {
-      // Check if sync is already running
-      const currentStatus = readSyncStatus();
-      if (currentStatus.status === "running") {
-        return {
-          status: "already_running",
-          message: "Sync is already in progress. Use rag_sync_status to check progress.",
-          progress: currentStatus.progress,
-        };
+      // 1) Check for existing sync lock/state (PID as primary liveness check)
+      if (existsSync(PID_FILE)) {
+        try {
+          const pidString = readFileSync(PID_FILE, "utf-8").trim();
+          const pid = parseInt(pidString, 10);
+
+          if (!isNaN(pid) && isProcessAlive(pid)) {
+            // 3) Process is alive - sync is genuinely in progress
+            const currentStatus = readSyncStatus();
+            return {
+              status: "already_running",
+              message: "Sync is already in progress. Use rag_sync_status to check progress.",
+              progress: currentStatus.progress,
+              pid: pid,
+            };
+          } else {
+            // 4) Process not alive - treat as stale
+            log("info", `[rag_sync] Worker process ${pid} not found. Cleaning up stale state.`);
+            if (existsSync(PID_FILE)) unlinkSync(PID_FILE);
+
+            // Optionally reset status file if it says it's running but process is dead
+            const currentStatus = readSyncStatus();
+            if (currentStatus.status === "running") {
+              writeFileSync(STATUS_FILE, JSON.stringify({
+                ...currentStatus,
+                status: "failed",
+                error: "Worker process died unexpectedly",
+                completed_at: new Date().toISOString(),
+              }, null, 2));
+            }
+          }
+        } catch (err) {
+          log("error", `[rag_sync] Error checking worker liveness: ${err}`);
+          // If PID file is corrupted, remove it
+          if (existsSync(PID_FILE)) unlinkSync(PID_FILE);
+        }
+      } else {
+        // No PID file - check if status file shows "running" (stale state)
+        const currentStatus = readSyncStatus();
+        if (currentStatus.status === "running") {
+          log("info", `[rag_sync] Status shows running but no PID file found. Cleaning up stale state.`);
+          writeFileSync(STATUS_FILE, JSON.stringify({
+            ...currentStatus,
+            status: "failed",
+            error: "Worker process died unexpectedly (no PID file)",
+            completed_at: new Date().toISOString(),
+          }, null, 2));
+        }
       }
 
+      // 5) Start new sync
       const force = args.force as boolean || false;
       const started = spawnSyncWorker(force);
 
@@ -474,6 +575,14 @@ export const ragTools: Tool[] = [
       } catch (error) {
         return { status: "error", error: error instanceof Error ? error.message : String(error) };
       }
+    },
+  },
+  {
+    name: "rag_sync_kill",
+    description: "Kill the running sync worker process. Use this to stop a background sync that was started with rag_sync.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
+      return killSyncWorker();
     },
   },
 ];
