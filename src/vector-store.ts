@@ -165,9 +165,28 @@ class LanceDBVectorStore implements VectorStore {
       return [];
     }
 
-    // Note: LanceDB search requires actual vectors
-    console.error("LanceDB search called - embeddings not yet implemented");
-    return [];
+    try {
+      // Search using vector similarity
+      // Pass the vector directly as the query
+      const vectorArray = Float32Array.from(queryEmbedding);
+      const results = await this.table.search(vectorArray).limit(limit).toArray();
+
+      return results.map((row: any) => ({
+        id: row.chunk_id || String(row.id),
+        documentId: row.document_id,
+        content: row.content,
+        metadata: {
+          title: row.title,
+          source: row.source,
+          page: row.page,
+          created: row.created,
+        },
+        score: row.score || (row._distance ? 1 - row._distance : 0), // LanceDB may include distance
+      }));
+    } catch (error) {
+      console.error("LanceDB search error:", error);
+      return [];
+    }
   }
   
   async deleteDocument(documentId: number): Promise<void> {

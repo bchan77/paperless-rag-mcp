@@ -401,21 +401,67 @@ async function runSyncInBackground(
 export const ragTools: Tool[] = [
   {
     name: "rag_query",
-    description: "Query documents using natural language. Returns relevant document chunks.",
+    description: "Query documents using natural language. Returns relevant document chunks with scores.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string" },
-        limit: { type: "number", default: 5 },
+        query: { 
+          type: "string",
+          description: "The search query in natural language",
+        },
+        limit: { 
+          type: "number", 
+          description: "Maximum number of results to return",
+          default: 5,
+        },
       },
       required: ["query"],
     },
-    handler: async (args) => ({
-      message: "rag_query not yet implemented with embeddings",
-      query: args.query,
-      results: [],
-      storage_mode: getStorageModeLabel(),
-    }),
+    handler: async (args) => {
+      const query = args.query as string;
+      const limit = (args.limit as number) || 5;
+      
+      log("info", `[rag_query] Searching for: "${query}" (limit: ${limit})`);
+      
+      try {
+        const store = await getVectorStore();
+        
+        // Embed the query
+        log("info", `[rag_query] Embedding query...`);
+        const { embedText } = await import("../embeddings.js");
+        const queryEmbedding = await embedText(query);
+        log("info", `[rag_query] Query embedded, searching vector store...`);
+        
+        // Search the vector store
+        const results = await store.search(queryEmbedding, limit);
+        log("info", `[rag_query] Found ${results.length} results`);
+        
+        return {
+          query,
+          results: results.map(r => ({
+            chunk_id: r.id,
+            document_id: r.documentId,
+            content: r.content,
+            title: r.metadata?.title || "Unknown",
+            source: r.metadata?.source || "",
+            page: r.metadata?.page,
+            score: r.score,
+          })),
+          storage_mode: getStorageModeLabel(),
+          total_results: results.length,
+        };
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        log("error", `[rag_query] Error: ${errMsg}`);
+        return {
+          status: "error",
+          error: errMsg,
+          query,
+          results: [],
+          storage_mode: getStorageModeLabel(),
+        };
+      }
+    },
   },
   {
     name: "rag_summarize",
