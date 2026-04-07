@@ -5,7 +5,7 @@ import { embedTexts, chunkText } from "../embeddings.js";
 import { createSyncJob, getJob, updateJobProgress, completeJob, failJob, listJobs } from "../jobs.js";
 import { log } from "../logger.js";
 import { spawn } from "child_process";
-import { readFileSync, existsSync, openSync, mkdirSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, openSync, mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { fileURLToPath } from "url";
 import type { Tool } from "./types.js";
@@ -24,10 +24,25 @@ function readSyncStatus(): any {
   }
 }
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    return err.code !== "ESRCH";
+  }
+}
+
 function spawnSyncWorker(force: boolean): boolean {
   try {
     const workerPath = join(fileURLToPath(import.meta.url), "../../sync-worker.js");
     const args = force ? ["--force"] : [];
+
+    // Ensure data directory exists
+    const dataDir = "./data";
+    if (!existsSync(dataDir)) {
+      mkdirSync(dataDir, { recursive: true });
+    }
 
     // Ensure logs directory exists
     if (!existsSync("./logs")) {
@@ -42,6 +57,11 @@ function spawnSyncWorker(force: boolean): boolean {
       stdio: ["ignore", "ignore", stderrFile],
       env: process.env,
     });
+
+    if (child.pid) {
+      writeFileSync(PID_FILE, child.pid.toString(), "utf-8");
+      log("info", `[rag_sync] Wrote PID file ${PID_FILE} (PID: ${child.pid})`);
+    }
 
     child.unref();
     log("info", `[rag_sync] Spawned sync worker process (PID: ${child.pid})`);
@@ -425,16 +445,57 @@ export const ragTools: Tool[] = [
       },
     },
     handler: async (args) => {
-      // Check if sync is already running
-      const currentStatus = readSyncStatus();
-      if (currentStatus.status === "running") {
-        return {
-          status: "already_running",
-          message: "Sync is already in progress. Use rag_sync_status to check progress.",
-          progress: currentStatus.progress,
-        };
+      // 1) Check for existing sync lock/state (PID as primary liveness check)
+      if (existsSync(PID_FILE)) {
+        try {
+          const pidString = readFileSync(PID_FILE, "utf-8").trim();
+          const pid = parseInt(pidString, 10);
+
+          if (!isNaN(pid) && isProcessAlive(pid)) {
+            // 3) Process is alive - sync is genuinely in progress
+            const currentStatus = readSyncStatus();
+            return {
+              status: "already_running",
+              message: "Sync is already in progress. Use rag_sync_status to check progress.",
+              progress: currentStatus.progress,
+              pid: pid,
+            };
+          } else {
+            // 4) Process not alive - treat as stale
+            log("info", `[rag_sync] Worker process ${pid} not found. Cleaning up stale state.`);
+            if (existsSync(PID_FILE)) unlinkSync(PID_FILE);
+
+            // Optionally reset status file if it says it's running but process is dead
+            const currentStatus = readSyncStatus();
+            if (currentStatus.status === "running") {
+              writeFileSync(STATUS_FILE, JSON.stringify({
+                ...currentStatus,
+                status: "failed",
+                error: "Worker process died unexpectedly",
+                completed_at: new Date().toISOString(),
+              }, null, 2));
+            }
+          }
+        } catch (err) {
+          log("error", `[rag_sync] Error checking worker liveness: ${err}`);
+          // If PID file is corrupted, remove it
+          if (existsSync(PID_FILE)) unlinkSync(PID_FILE);
+        }
+      } else {
+        // No PID file - check if status file shows "running" (stale state)
+        const currentStatus = readSyncStatus();
+        if (currentStatus.status === "running") {
+          log("info", `[rag_sync] Status shows running but no PID file found. Cleaning up stale state.`);
+          writeFileSync(STATUS_FILE, JSON.stringify({
+            ...currentStatus,
+            status: "failed",
+            error: "Worker process died unexpectedly (no PID file)",
+            completed_at: new Date().toISOString(),
+          }, null, 2));
+        }
       }
 
+      // 5) Start new sync
       const force = args.force as boolean || false;
       const started = spawnSyncWorker(force);
 

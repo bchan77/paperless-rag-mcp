@@ -8,13 +8,42 @@ import { getVectorStore } from "./vector-store.js";
 import { PaperlessAPI } from "@baruchiro/paperless-mcp/build/api/PaperlessAPI.js";
 import { initConfig, getConfig } from "./config.js";
 import { embedTexts, chunkText } from "./embeddings.js";
-import { writeFileSync, appendFileSync, mkdirSync, existsSync } from "fs";
+import { writeFileSync, appendFileSync, mkdirSync, existsSync, unlinkSync } from "fs";
 import { join } from "path";
 
 const STATUS_DIR = "./data";
 const STATUS_FILE = join(STATUS_DIR, "sync-status.json");
+const PID_FILE = join(STATUS_DIR, "sync-worker.pid");
 const LOG_FILE = "./logs/sync-worker.log";
 const BATCH_SIZE = 50; // Process 50 documents at a time to avoid OOM
+
+// Track parent process to detect if MCP server dies
+const parentPid = process.ppid;
+
+function isParentAlive(): boolean {
+  try {
+    process.kill(parentPid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Check parent every 10 seconds, exit if parent died
+const parentCheckInterval = setInterval(() => {
+  if (!isParentAlive()) {
+    log("Parent process (MCP server) died, shutting down");
+    writeStatus({
+      status: "failed",
+      started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+      progress: { phase: "Orphaned", current: 0, total: 0 },
+      error: "MCP server process died, worker shutting down",
+    });
+    cleanupPid();
+    process.exit(0);
+  }
+}, 10000);
 
 // Crash handlers
 function logCrash(message: string) {
@@ -37,6 +66,21 @@ process.on("uncaughtException", (err) => {
 
 process.on("unhandledRejection", (reason) => {
   logCrash(`Unhandled rejection: ${reason}`);
+});
+
+// Graceful shutdown on SIGTERM (sent by rag_sync_kill)
+process.on("SIGTERM", () => {
+  log("Received SIGTERM, shutting down gracefully...");
+  clearInterval(parentCheckInterval);
+  writeStatus({
+    status: "failed",
+    started_at: new Date().toISOString(),
+    completed_at: new Date().toISOString(),
+    progress: { phase: "Killed by user", current: 0, total: 0 },
+    error: "Sync was stopped by user (rag_sync_kill)",
+  });
+  cleanupPid();
+  process.exit(0);
 });
 
 interface SyncStatus {
@@ -171,6 +215,17 @@ async function processBatch(
   return { chunksCreated: chunks.length };
 }
 
+function cleanupPid() {
+  try {
+    if (existsSync(PID_FILE)) {
+      unlinkSync(PID_FILE);
+      log("Removed PID file");
+    }
+  } catch (err) {
+    log(`Failed to remove PID file: ${err}`);
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const force = args.includes("--force");
@@ -228,6 +283,8 @@ async function main() {
           time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
         },
       });
+      clearInterval(parentCheckInterval);
+      cleanupPid();
       return;
     }
 
@@ -279,6 +336,8 @@ async function main() {
         time_seconds: timeSeconds,
       },
     });
+    clearInterval(parentCheckInterval);
+    cleanupPid();
 
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
@@ -296,6 +355,8 @@ async function main() {
         time_seconds: ((Date.now() - startTime) / 1000).toFixed(2),
       },
     });
+    clearInterval(parentCheckInterval);
+    cleanupPid();
     process.exit(1);
   }
 }
