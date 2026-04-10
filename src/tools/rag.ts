@@ -515,15 +515,11 @@ export const ragTools: Tool[] = [
         const { default: OpenAI } = await import("openai");
         const config = getConfig();
         
-        if (!config.openaiApiKey) {
-          return {
-            status: "error",
-            error: "OPENAI_API_KEY is required for summarization",
-            document_id: documentId,
-          };
+        // API key is optional if using a local model without auth
+        const openaiOptions: { apiKey?: string; baseURL?: string } = {};
+        if (config.openaiApiKey) {
+          openaiOptions.apiKey = config.openaiApiKey;
         }
-        
-        const openaiOptions: { apiKey: string; baseURL?: string } = { apiKey: config.openaiApiKey };
         if (config.openaiApiUrl) {
           openaiOptions.baseURL = config.openaiApiUrl;
         }

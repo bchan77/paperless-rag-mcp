@@ -51,10 +51,10 @@ export function loadConfig(): Config {
   const lancedbPath = process.env.LANCEDB_PATH || "./data/lancedb";
   const embeddingProvider = (process.env.EMBEDDING_PROVIDER || "openai") as "openai" | "ollama";
   const openaiApiKey = process.env.OPENAI_API_KEY;
+  const openaiApiUrl = process.env.OPENAI_API_URL;
   const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
   const ollamaEmbedModel = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
   const ollamaMaxChars = parseInt(process.env.OLLAMA_MAX_CHARS || "1000", 10);
-  const openaiApiUrl = process.env.OPENAI_API_URL;
   const openaiModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
   // Validate required variables
@@ -74,11 +74,11 @@ export function loadConfig(): Config {
     });
   }
 
-  if (embeddingProvider === "openai" && !openaiApiKey) {
+  if (embeddingProvider === "openai" && !openaiApiKey && !openaiApiUrl) {
     errors.push({
       variable: "OPENAI_API_KEY",
       feature: "OpenAI embeddings",
-      hint: "Set your OpenAI API key, or set EMBEDDING_PROVIDER=ollama to use a local model",
+      hint: "Set your OpenAI API key, or use EMBEDDING_PROVIDER=ollama, or set OPENAI_API_URL for a proxy",
     });
   }
 
