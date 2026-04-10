@@ -523,12 +523,16 @@ export const ragTools: Tool[] = [
           };
         }
         
-        const openai = new OpenAI({ apiKey: config.openaiApiKey });
+        const openaiOptions: { apiKey: string; baseURL?: string } = { apiKey: config.openaiApiKey };
+        if (config.openaiApiUrl) {
+          openaiOptions.baseURL = config.openaiApiUrl;
+        }
+        const openai = new OpenAI(openaiOptions);
         
         log("info", `[rag_summarize] Calling OpenAI for document ${documentId}`);
         
         const response = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
+          model: config.openaiModel,
           messages: [
             {
               role: "system",
@@ -552,7 +556,7 @@ export const ragTools: Tool[] = [
           title: doc.title || `Document ${documentId}`,
           summary,
           word_count: summary.split(/\s+/).length,
-          source: "openai/gpt-4o-mini",
+          source: `openai/${config.openaiModel}`,
         };
         
       } catch (error) {

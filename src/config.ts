@@ -22,6 +22,8 @@ export interface Config {
 
   // OpenAI: required when embeddingProvider is "openai"
   openaiApiKey: string | undefined;
+  openaiApiUrl: string | undefined;
+  openaiModel: string;
 
   // Ollama: used when embeddingProvider is "ollama"
   ollamaUrl: string;
@@ -52,6 +54,8 @@ export function loadConfig(): Config {
   const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
   const ollamaEmbedModel = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
   const ollamaMaxChars = parseInt(process.env.OLLAMA_MAX_CHARS || "1000", 10);
+  const openaiApiUrl = process.env.OPENAI_API_URL;
+  const openaiModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
   // Validate required variables
   if (!paperlessUrl) {
@@ -100,6 +104,8 @@ export function loadConfig(): Config {
     lancedbPath,
     embeddingProvider,
     openaiApiKey,
+    openaiApiUrl,
+    openaiModel,
     ollamaUrl,
     ollamaEmbedModel,
     ollamaMaxChars,
