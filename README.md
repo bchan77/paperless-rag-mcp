@@ -106,6 +106,18 @@ paperless-rag-mcp/
 - `rag_sync` - Sync documents from Paperless to vector store
 - `rag_stats` - Get vector store statistics
 
+## Testing
+
+### Using MCP Inspector
+
+You can use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) to test this server or other MCP servers.
+
+**Test this server:**
+
+```bash
+npx @modelcontextprotocol/inspector npm run dev
+```
+
 ## License
 
 MIT
