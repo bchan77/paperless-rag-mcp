@@ -32,7 +32,8 @@ export interface SearchResult {
   documentId: number;
   content: string;
   metadata: Record<string, unknown>;
-  score?: number;
+  score: number;        // 0-1 similarity (1 = identical)
+  match_percent: number; // 0-100 rounded percentage
 }
 
 export interface ChunkInfo {
@@ -127,13 +128,22 @@ class LanceDBVectorStore implements VectorStore {
     
     // Open or create documents table
     if (tableNames.includes("documents")) {
-      this.table = await this.db.openTable("documents");
+      try {
+        this.table = await this.db.openTable("documents");
+      } catch {
+        // Table metadata exists but files are missing/corrupt — treat as empty
+        this.table = null;
+      }
     }
-    
+
     // Open indexed_documents tracking table if it exists
     // Table will be created on first markDocumentsIndexed call with actual data
     if (tableNames.includes("indexed_documents")) {
-      this.indexedTable = await this.db.openTable("indexed_documents");
+      try {
+        this.indexedTable = await this.db.openTable("indexed_documents");
+      } catch {
+        this.indexedTable = null;
+      }
     }
   }
   
@@ -165,9 +175,31 @@ class LanceDBVectorStore implements VectorStore {
       return [];
     }
 
-    // Note: LanceDB search requires actual vectors
-    console.error("LanceDB search called - embeddings not yet implemented");
-    return [];
+    try {
+      // Search using vector similarity
+      // Pass the vector directly as the query
+      const vectorArray = Float32Array.from(queryEmbedding);
+      const results = await this.table.search(vectorArray).limit(limit).toArray();
+
+      return results.map((row: any) => ({
+        id: row.chunk_id || String(row.id),
+        documentId: row.document_id,
+        content: row.content,
+        metadata: {
+          title: row.title,
+          source: row.source,
+          page: row.page,
+          created: row.created,
+        },
+        // _distance is L2 distance (0=identical, 2=opposite for normalized vectors).
+        // Convert to 0-1 similarity: 1 - distance/2
+        score: row._distance != null ? Math.max(0, 1 - row._distance / 2) : (row.score ?? 0),
+        match_percent: row._distance != null ? Math.round(Math.max(0, 1 - row._distance / 2) * 100) : Math.round((row.score ?? 0) * 100),
+      }));
+    } catch (error) {
+      console.error("LanceDB search error:", error);
+      return [];
+    }
   }
   
   async deleteDocument(documentId: number): Promise<void> {
@@ -363,6 +395,7 @@ class QdrantVectorStore implements VectorStore {
       content: result.payload?.content as string,
       metadata: result.payload as Record<string, unknown>,
       score: result.score,
+      match_percent: Math.round(result.score * 100),
     }));
   }
   

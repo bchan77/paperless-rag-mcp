@@ -17,8 +17,16 @@ export interface Config {
   // Optional: LanceDB storage path (defaults to ./data/lancedb)
   lancedbPath: string;
 
-  // Optional: OpenAI API key (required when RAG features are used)
+  // Embedding provider: "openai" (default) or "ollama"
+  embeddingProvider: "openai" | "ollama";
+
+  // OpenAI: required when embeddingProvider is "openai"
   openaiApiKey: string | undefined;
+
+  // Ollama: used when embeddingProvider is "ollama"
+  ollamaUrl: string;
+  ollamaEmbedModel: string;
+  ollamaMaxChars: number;
 }
 
 interface ConfigError {
@@ -39,7 +47,11 @@ export function loadConfig(): Config {
   const qdrantUrl = process.env.QDRANT_URL;
   const qdrantCollection = process.env.QDRANT_COLLECTION || "paperless_documents";
   const lancedbPath = process.env.LANCEDB_PATH || "./data/lancedb";
+  const embeddingProvider = (process.env.EMBEDDING_PROVIDER || "openai") as "openai" | "ollama";
   const openaiApiKey = process.env.OPENAI_API_KEY;
+  const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
+  const ollamaEmbedModel = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
+  const ollamaMaxChars = parseInt(process.env.OLLAMA_MAX_CHARS || "1000", 10);
 
   // Validate required variables
   if (!paperlessUrl) {
@@ -55,6 +67,14 @@ export function loadConfig(): Config {
       variable: "PAPERLESS_TOKEN",
       feature: "Paperless-ngx integration",
       hint: "Generate an API token in Paperless-ngx under Settings > API Tokens",
+    });
+  }
+
+  if (embeddingProvider === "openai" && !openaiApiKey) {
+    errors.push({
+      variable: "OPENAI_API_KEY",
+      feature: "OpenAI embeddings",
+      hint: "Set your OpenAI API key, or set EMBEDDING_PROVIDER=ollama to use a local model",
     });
   }
 
@@ -78,7 +98,11 @@ export function loadConfig(): Config {
     qdrantUrl,
     qdrantCollection,
     lancedbPath,
+    embeddingProvider,
     openaiApiKey,
+    ollamaUrl,
+    ollamaEmbedModel,
+    ollamaMaxChars,
   };
 }
 

@@ -35,7 +35,11 @@ function isProcessAlive(pid: number): boolean {
 
 function spawnSyncWorker(force: boolean): boolean {
   try {
-    const workerPath = join(fileURLToPath(import.meta.url), "../../sync-worker.js");
+    const currentFile = fileURLToPath(import.meta.url);
+    const isDevMode = currentFile.endsWith(".ts");
+    const workerPath = isDevMode
+      ? join(currentFile, "../../sync-worker.ts")
+      : join(currentFile, "../../sync-worker.js");
     const args = force ? ["--force"] : [];
 
     // Ensure data directory exists
@@ -52,7 +56,12 @@ function spawnSyncWorker(force: boolean): boolean {
     // Redirect stderr to file to capture OOM and other fatal errors
     const stderrFile = openSync("./logs/sync-worker-stderr.log", "a");
 
-    const child = spawn("node", ["--report-on-fatalerror", workerPath, ...args], {
+    // In dev mode (tsx), spawn with --import=tsx so the worker can load .ts files
+    const nodeArgs = isDevMode
+      ? ["--report-on-fatalerror", "--import=tsx", workerPath, ...args]
+      : ["--report-on-fatalerror", workerPath, ...args];
+
+    const child = spawn("node", nodeArgs, {
       detached: true,
       stdio: ["ignore", "ignore", stderrFile],
       env: process.env,
@@ -401,21 +410,68 @@ async function runSyncInBackground(
 export const ragTools: Tool[] = [
   {
     name: "rag_query",
-    description: "Query documents using natural language. Returns relevant document chunks.",
+    description: "Query documents using natural language. Returns relevant document chunks with scores.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string" },
-        limit: { type: "number", default: 5 },
+        query: { 
+          type: "string",
+          description: "The search query in natural language",
+        },
+        limit: { 
+          type: "number", 
+          description: "Maximum number of results to return",
+          default: 5,
+        },
       },
       required: ["query"],
     },
-    handler: async (args) => ({
-      message: "rag_query not yet implemented with embeddings",
-      query: args.query,
-      results: [],
-      storage_mode: getStorageModeLabel(),
-    }),
+    handler: async (args) => {
+      const query = args.query as string;
+      const limit = (args.limit as number) || 5;
+      
+      log("info", `[rag_query] Searching for: "${query}" (limit: ${limit})`);
+      
+      try {
+        const store = await getVectorStore();
+        
+        // Embed the query
+        log("info", `[rag_query] Embedding query...`);
+        const { embedText } = await import("../embeddings.js");
+        const queryEmbedding = await embedText(query);
+        log("info", `[rag_query] Query embedded, searching vector store...`);
+        
+        // Search the vector store
+        const results = await store.search(queryEmbedding, limit);
+        log("info", `[rag_query] Found ${results.length} results`);
+        
+        return {
+          query,
+          results: results.map(r => ({
+            chunk_id: r.id,
+            document_id: r.documentId,
+            content: r.content,
+            title: r.metadata?.title || "Unknown",
+            source: r.metadata?.source || "",
+            page: r.metadata?.page,
+            match_percent: r.match_percent,
+            score: r.score,
+          })),
+          storage_mode: getStorageModeLabel(),
+          total_results: results.length,
+        };
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        log("error", `[rag_query] Error: ${errMsg}`);
+        return {
+          status: "error",
+          error: errMsg,
+          query,
+          results: [],
+          storage_mode: getStorageModeLabel(),
+        };
+      }
+    },
   },
   {
     name: "rag_summarize",
