@@ -127,13 +127,22 @@ class LanceDBVectorStore implements VectorStore {
     
     // Open or create documents table
     if (tableNames.includes("documents")) {
-      this.table = await this.db.openTable("documents");
+      try {
+        this.table = await this.db.openTable("documents");
+      } catch {
+        // Table metadata exists but files are missing/corrupt — treat as empty
+        this.table = null;
+      }
     }
-    
+
     // Open indexed_documents tracking table if it exists
     // Table will be created on first markDocumentsIndexed call with actual data
     if (tableNames.includes("indexed_documents")) {
-      this.indexedTable = await this.db.openTable("indexed_documents");
+      try {
+        this.indexedTable = await this.db.openTable("indexed_documents");
+      } catch {
+        this.indexedTable = null;
+      }
     }
   }
   

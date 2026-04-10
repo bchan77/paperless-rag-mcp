@@ -35,7 +35,11 @@ function isProcessAlive(pid: number): boolean {
 
 function spawnSyncWorker(force: boolean): boolean {
   try {
-    const workerPath = join(fileURLToPath(import.meta.url), "../../sync-worker.js");
+    const currentFile = fileURLToPath(import.meta.url);
+    const isDevMode = currentFile.endsWith(".ts");
+    const workerPath = isDevMode
+      ? join(currentFile, "../../sync-worker.ts")
+      : join(currentFile, "../../sync-worker.js");
     const args = force ? ["--force"] : [];
 
     // Ensure data directory exists
@@ -52,7 +56,12 @@ function spawnSyncWorker(force: boolean): boolean {
     // Redirect stderr to file to capture OOM and other fatal errors
     const stderrFile = openSync("./logs/sync-worker-stderr.log", "a");
 
-    const child = spawn("node", ["--report-on-fatalerror", workerPath, ...args], {
+    // In dev mode (tsx), spawn with --import=tsx so the worker can load .ts files
+    const nodeArgs = isDevMode
+      ? ["--report-on-fatalerror", "--import=tsx", workerPath, ...args]
+      : ["--report-on-fatalerror", workerPath, ...args];
+
+    const child = spawn("node", nodeArgs, {
       detached: true,
       stdio: ["ignore", "ignore", stderrFile],
       env: process.env,

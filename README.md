@@ -115,7 +115,7 @@ You can use the [MCP Inspector](https://github.com/modelcontextprotocol/inspecto
 **Test this server:**
 
 ```bash
-npx @modelcontextprotocol/inspector npm run dev
+npx @modelcontextprotocol/inspector npm run dev --silent
 ```
 
 ## License
