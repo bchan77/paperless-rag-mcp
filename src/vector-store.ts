@@ -32,7 +32,8 @@ export interface SearchResult {
   documentId: number;
   content: string;
   metadata: Record<string, unknown>;
-  score?: number;
+  score: number;        // 0-1 similarity (1 = identical)
+  match_percent: number; // 0-100 rounded percentage
 }
 
 export interface ChunkInfo {
@@ -190,7 +191,10 @@ class LanceDBVectorStore implements VectorStore {
           page: row.page,
           created: row.created,
         },
-        score: row.score || (row._distance ? 1 - row._distance : 0), // LanceDB may include distance
+        // _distance is L2 distance (0=identical, 2=opposite for normalized vectors).
+        // Convert to 0-1 similarity: 1 - distance/2
+        score: row._distance != null ? Math.max(0, 1 - row._distance / 2) : (row.score ?? 0),
+        match_percent: row._distance != null ? Math.round(Math.max(0, 1 - row._distance / 2) * 100) : Math.round((row.score ?? 0) * 100),
       }));
     } catch (error) {
       console.error("LanceDB search error:", error);
@@ -391,6 +395,7 @@ class QdrantVectorStore implements VectorStore {
       content: result.payload?.content as string,
       metadata: result.payload as Record<string, unknown>,
       score: result.score,
+      match_percent: Math.round(result.score * 100),
     }));
   }
   

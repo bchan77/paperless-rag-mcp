@@ -26,6 +26,7 @@ export interface Config {
   // Ollama: used when embeddingProvider is "ollama"
   ollamaUrl: string;
   ollamaEmbedModel: string;
+  ollamaMaxChars: number;
 }
 
 interface ConfigError {
@@ -50,6 +51,7 @@ export function loadConfig(): Config {
   const openaiApiKey = process.env.OPENAI_API_KEY;
   const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
   const ollamaEmbedModel = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
+  const ollamaMaxChars = parseInt(process.env.OLLAMA_MAX_CHARS || "1000", 10);
 
   // Validate required variables
   if (!paperlessUrl) {
@@ -100,6 +102,7 @@ export function loadConfig(): Config {
     openaiApiKey,
     ollamaUrl,
     ollamaEmbedModel,
+    ollamaMaxChars,
   };
 }
 

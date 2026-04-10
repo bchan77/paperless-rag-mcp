@@ -42,18 +42,43 @@ async function embedWithOpenAI(texts: string[]): Promise<number[][]> {
 
 async function embedWithOllama(texts: string[]): Promise<number[][]> {
   const config = getConfig();
-  const response = await fetch(`${config.ollamaUrl}/api/embed`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: config.ollamaEmbedModel, input: texts }),
-  });
+  const url = `${config.ollamaUrl}/api/embed`;
+
+  // Truncate texts exceeding the configured context limit.
+  // Set OLLAMA_MAX_CHARS in .env to tune this (default: 1000).
+  const truncated = texts.map(t =>
+    t.length > config.ollamaMaxChars ? t.slice(0, config.ollamaMaxChars) : t
+  );
+
+  const maxLen = Math.max(...truncated.map(t => t.length));
+  const totalLen = truncated.reduce((sum, t) => sum + t.length, 0);
+  console.error(`[embedWithOllama] texts=${texts.length} maxLen=${maxLen} totalLen=${totalLen} ollamaMaxChars=${config.ollamaMaxChars}`);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: config.ollamaEmbedModel, input: truncated }),
+    });
+  } catch (err: any) {
+    const reason = err?.cause?.code === "ECONNREFUSED"
+      ? "connection refused — is Ollama running?"
+      : err?.cause?.message ?? err?.message ?? String(err);
+    throw new Error(`Ollama unreachable at ${url}: ${reason}`);
+  }
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Ollama embed failed (${response.status}): ${body}`);
+    throw new Error(`Ollama embed failed (HTTP ${response.status}) for model "${config.ollamaEmbedModel}": ${body}`);
   }
 
   const data = await response.json() as { embeddings: number[][] };
+
+  if (!data.embeddings || data.embeddings.length === 0) {
+    throw new Error(`Ollama returned no embeddings for model "${config.ollamaEmbedModel}" — is the model pulled? Run: ollama pull ${config.ollamaEmbedModel}`);
+  }
+
   return data.embeddings;
 }
 
@@ -72,17 +97,16 @@ export async function embedTexts(texts: string[], onProgress?: (current: number,
   const config = getConfig();
 
   if (config.embeddingProvider === "ollama") {
-    // Ollama handles batches natively; process in chunks to avoid overloading
-    const BATCH_SIZE = 50;
+    // Send one text at a time — some Ollama models reject batches that together
+    // exceed the context window, even though each text individually fits.
     const embeddings: number[][] = [];
 
-    for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-      const batch = texts.slice(i, i + BATCH_SIZE);
-      const batchEmbeddings = await embedWithOllama(batch);
-      embeddings.push(...batchEmbeddings);
+    for (let i = 0; i < texts.length; i++) {
+      const [embedding] = await embedWithOllama([texts[i]]);
+      embeddings.push(embedding);
 
       if (onProgress) {
-        onProgress(Math.min(i + BATCH_SIZE, texts.length), texts.length);
+        onProgress(i + 1, texts.length);
       }
     }
 

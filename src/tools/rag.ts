@@ -454,6 +454,7 @@ export const ragTools: Tool[] = [
             title: r.metadata?.title || "Unknown",
             source: r.metadata?.source || "",
             page: r.metadata?.page,
+            match_percent: r.match_percent,
             score: r.score,
           })),
           storage_mode: getStorageModeLabel(),

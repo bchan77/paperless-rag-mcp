@@ -77,7 +77,30 @@ npm run dev
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `QDRANT_URL` | Qdrant URL (if using instead of LanceDB) | Not set (uses LanceDB) |
-| `OPENAI_API_KEY` | OpenAI API key for embeddings | Not set (required when using RAG features) |
+| `LANCEDB_PATH` | Path for LanceDB storage | `./data/lancedb` |
+| `OPENAI_API_KEY` | OpenAI API key for embeddings (required when `EMBEDDING_PROVIDER=openai`) | Not set |
+| `EMBEDDING_PROVIDER` | Embedding backend: `openai` or `ollama` | `openai` |
+| `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
+| `OLLAMA_EMBED_MODEL` | Ollama embedding model to use | `nomic-embed-text` |
+| `OLLAMA_MAX_CHARS` | Max characters per chunk sent to Ollama. Tune based on your model's context window: `num_ctx × 2` is a safe estimate (e.g., `nomic-embed-text` has `num_ctx=8192` → `16000`). Check your model's `num_ctx` with `ollama show <model>`. | `1000` |
+
+### Embedding Providers
+
+**OpenAI** (default): Requires `OPENAI_API_KEY`. Uses `text-embedding-3-small` (1536 dimensions).
+
+**Ollama** (local, free): Set `EMBEDDING_PROVIDER=ollama`. Pull a model first:
+```bash
+ollama pull nomic-embed-text
+```
+Then check its context window to set `OLLAMA_MAX_CHARS`:
+```bash
+ollama show nomic-embed-text | grep num_ctx
+# num_ctx = 8192 → set OLLAMA_MAX_CHARS=16000
+```
+
+> **WSL users:** If Ollama is running on Windows, set `OLLAMA_URL` to your Windows host IP instead of `localhost`. Find it with `cat /etc/resolv.conf | grep nameserver`. You also need to allow network access by setting `OLLAMA_HOST=0.0.0.0` in Windows environment variables and restarting Ollama.
+
+> **WSL users:** LanceDB's Rust layer does not handle `/mnt/c/` paths correctly on WSL. Set `LANCEDB_PATH` to a Linux-native path (e.g., `/home/<user>/.local/share/paperless-rag-mcp/lancedb`) to avoid errors.
 
 ### Project Structure
 

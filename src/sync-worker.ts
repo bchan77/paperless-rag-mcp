@@ -144,75 +144,77 @@ async function fetchAllDocuments(paperless: PaperlessAPI): Promise<any[]> {
   return allDocs;
 }
 
-// Process a single batch of documents - chunk, embed, store, then release memory
+// Process a single batch of documents - one doc at a time to keep memory low
 async function processBatch(
   docs: any[],
   store: any,
   config: any,
   chunkSize: number
-): Promise<{ chunksCreated: number }> {
-  // Create chunks for this batch only
-  const chunks: any[] = [];
-  const docChunkCounts: Map<number, number> = new Map();
+): Promise<{ chunksCreated: number; skipped: number }> {
+  const EMBED_SUB_BATCH = 10;
+  let totalChunks = 0;
+  let skipped = 0;
 
   for (const doc of docs) {
     const content = doc.content || "";
-    if (!content.trim()) continue;
+    if (!content.trim()) {
+      await store.markDocumentsIndexed(
+        doc.id,
+        doc.modified || doc.created || new Date().toISOString(),
+        0
+      );
+      continue;
+    }
 
     const textChunks = chunkText(content, chunkSize);
-    docChunkCounts.set(doc.id, textChunks.length);
+    log(`Doc ${doc.id} "${doc.title}": ${content.length} chars → ${textChunks.length} chunks`);
 
-    for (let j = 0; j < textChunks.length; j++) {
-      chunks.push({
-        id: `${doc.id}-chunk-${j}`,
-        documentId: doc.id,
-        content: textChunks[j],
-        metadata: {
-          title: doc.title || `Document ${doc.id}`,
-          source: config.paperlessUrl,
-          page: j + 1,
-          created: doc.created,
-          modified: doc.modified,
-        },
-      });
+    const chunks: any[] = textChunks.map((text, j) => ({
+      id: `${doc.id}-chunk-${j}`,
+      documentId: doc.id,
+      content: text,
+      metadata: {
+        title: doc.title || `Document ${doc.id}`,
+        source: config.paperlessUrl,
+        page: j + 1,
+        created: doc.created,
+        modified: doc.modified,
+      },
+    }));
+
+    // Embed in small sub-batches — skip doc on error rather than crashing
+    let embedFailed = false;
+    for (let i = 0; i < chunks.length; i += EMBED_SUB_BATCH) {
+      const sub = chunks.slice(i, i + EMBED_SUB_BATCH);
+      try {
+        const embeddings = await embedTexts(sub.map(c => c.content));
+        for (let j = 0; j < embeddings.length; j++) {
+          sub[j].embedding = embeddings[j];
+        }
+      } catch (err) {
+        log(`Doc ${doc.id} "${doc.title}" chunk ${i}-${i + sub.length}: embed failed — skipping doc. Error: ${err}`);
+        embedFailed = true;
+        break;
+      }
     }
-  }
 
-  if (chunks.length === 0) {
-    return { chunksCreated: 0 };
-  }
-
-  log(`Batch: ${docs.length} docs -> ${chunks.length} chunks, generating embeddings...`);
-
-  // Generate embeddings in small sub-batches
-  const contents = chunks.map(c => c.content);
-  for (let i = 0; i < contents.length; i += 10) {
-    const batch = contents.slice(i, i + 10);
-    const batchEmbeddings = await embedTexts(batch);
-    for (let j = 0; j < batchEmbeddings.length; j++) {
-      chunks[i + j].embedding = batchEmbeddings[j];
+    if (embedFailed) {
+      skipped++;
+      continue;
     }
-  }
 
-  // Delete old data for these documents
-  for (const doc of docs) {
     await store.deleteDocument(doc.id);
-  }
-
-  // Store chunks
-  await store.addDocuments(chunks);
-
-  // Mark as indexed
-  for (const doc of docs) {
-    const chunkCount = docChunkCounts.get(doc.id) || 0;
+    await store.addDocuments(chunks);
     await store.markDocumentsIndexed(
       doc.id,
       doc.modified || doc.created || new Date().toISOString(),
-      chunkCount
+      chunks.length
     );
+
+    totalChunks += chunks.length;
   }
 
-  return { chunksCreated: chunks.length };
+  return { chunksCreated: totalChunks, skipped };
 }
 
 function cleanupPid() {
@@ -267,6 +269,8 @@ async function main() {
       docsToSync = paperlessDocs.filter(d => needsSyncIds.includes(d.id));
       totalSkipped = paperlessDocs.length - docsToSync.length;
       log(`Delta sync: ${docsToSync.length} need sync, ${totalSkipped} already up-to-date`);
+      // Free docs we don't need to reclaim memory before processing
+      paperlessDocs.splice(0, paperlessDocs.length);
     }
 
     if (docsToSync.length === 0) {
@@ -310,10 +314,10 @@ async function main() {
       });
 
       const result = await processBatch(batchDocs, store, config, chunkSize);
-      totalDocsProcessed += batchDocs.length;
+      totalDocsProcessed += batchDocs.length - result.skipped;
       totalChunksCreated += result.chunksCreated;
 
-      log(`Batch ${batchNum + 1} done: +${result.chunksCreated} chunks (total: ${totalChunksCreated})`);
+      log(`Batch ${batchNum + 1} done: +${result.chunksCreated} chunks, ${result.skipped} skipped (total chunks: ${totalChunksCreated})`);
 
       // Force garbage collection hint (won't always work but helps)
       if (global.gc) {
