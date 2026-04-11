@@ -475,21 +475,96 @@ export const ragTools: Tool[] = [
   },
   {
     name: "rag_summarize",
-    description: "Summarize a document",
+    description: "Summarize a document using AI. Returns a concise summary of the document content.",
     inputSchema: {
       type: "object",
       properties: {
-        document_id: { type: "number" },
-        max_length: { type: "number", default: 200 },
+        document_id: { 
+          type: "number",
+          description: "The document ID from Paperless to summarize",
+        },
+        max_length: { 
+          type: "number", 
+          description: "Approximate maximum word count for the summary",
+          default: 200,
+        },
       },
       required: ["document_id"],
     },
-    handler: async (args) => ({
-      message: "rag_summarize not yet implemented",
-      document_id: args.document_id,
-      summary: "",
-      storage_mode: getStorageModeLabel(),
-    }),
+    handler: async (args) => {
+      const documentId = args.document_id as number;
+      const maxLength = (args.max_length as number) || 200;
+      
+      log("info", `[rag_summarize] Summarizing document ${documentId} (max: ${maxLength} words)`);
+      
+      try {
+        // Get document content from Paperless
+        const paperless = getPaperlessAPI();
+        const doc = await paperless.getDocument(documentId);
+        
+        const content = doc.content || "";
+        if (!content.trim()) {
+          return {
+            status: "error",
+            error: `Document ${documentId} has no content to summarize`,
+            document_id: documentId,
+          };
+        }
+        
+        // Summarize using OpenAI
+        const { default: OpenAI } = await import("openai");
+        const config = getConfig();
+        
+        // API key is optional if using a local model without auth
+        const openaiOptions: { apiKey?: string; baseURL?: string } = {};
+        if (config.openaiApiKey) {
+          openaiOptions.apiKey = config.openaiApiKey;
+        }
+        if (config.openaiApiUrl) {
+          openaiOptions.baseURL = config.openaiApiUrl;
+        }
+        const openai = new OpenAI(openaiOptions);
+        
+        log("info", `[rag_summarize] Calling OpenAI for document ${documentId}`);
+        
+        const response = await openai.chat.completions.create({
+          model: config.openaiModel,
+          messages: [
+            {
+              role: "system",
+              content: `You are a document summarizer. Create a concise summary of the following document in approximately ${maxLength} words. Focus on the key points and main topics. Return only the summary, no introductions or conclusions.`,
+            },
+            {
+              role: "user",
+              content: content,
+            },
+          ],
+          max_tokens: Math.round(maxLength * 1.5),
+          temperature: 0.3,
+        });
+        
+        const summary = response.choices[0]?.message?.content || "No summary generated";
+        
+        log("info", `[rag_summarize] Summary generated for document ${documentId}`);
+        
+        return {
+          document_id: documentId,
+          title: doc.title || `Document ${documentId}`,
+          summary,
+          word_count: summary.split(/\s+/).length,
+          source: `openai/${config.openaiModel}`,
+        };
+        
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        log("error", `[rag_summarize] Error: ${errMsg}`);
+        return {
+          status: "error",
+          error: errMsg,
+          document_id: documentId,
+        };
+      }
+    },
   },
   {
     name: "rag_sync",
