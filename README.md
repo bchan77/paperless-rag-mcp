@@ -71,7 +71,7 @@ MCP-Compatible AI Assistant → paperless-rag-mcp → Paperless-ngx
 
 ```bash
 # Clone the repo
-git clone https://github.com/yourusername/paperless-rag-mcp.git
+git clone https://github.com/bchan77/paperless-rag-mcp.git
 cd paperless-rag-mcp
 
 # Install dependencies
