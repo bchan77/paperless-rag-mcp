@@ -13,6 +13,9 @@ export interface Config {
   // Optional: Qdrant vector database (defaults to LanceDB if not set)
   qdrantUrl: string | undefined;
   qdrantCollection: string;
+  qdrantRetryMax: number;
+  qdrantRetryDelayMs: number;
+  qdrantRetryMaxDelayMs: number;
 
   // Optional: LanceDB storage path (defaults to ./data/lancedb)
   lancedbPath: string;
@@ -48,6 +51,9 @@ export function loadConfig(): Config {
   const paperlessToken = process.env.PAPERLESS_TOKEN;
   const qdrantUrl = process.env.QDRANT_URL;
   const qdrantCollection = process.env.QDRANT_COLLECTION || "paperless_documents";
+  const qdrantRetryMax = parseInt(process.env.QDRANT_RETRY_MAX || "15", 10);
+  const qdrantRetryDelayMs = parseInt(process.env.QDRANT_RETRY_DELAY_MS || "2000", 10);
+  const qdrantRetryMaxDelayMs = parseInt(process.env.QDRANT_RETRY_MAX_DELAY_MS || "60000", 10);
   const lancedbPath = process.env.LANCEDB_PATH || "./data/lancedb";
   const embeddingProvider = (process.env.EMBEDDING_PROVIDER || "openai") as "openai" | "ollama";
   const openaiApiKey = process.env.OPENAI_API_KEY;
@@ -101,6 +107,9 @@ export function loadConfig(): Config {
     paperlessToken: paperlessToken!,
     qdrantUrl,
     qdrantCollection,
+    qdrantRetryMax,
+    qdrantRetryDelayMs,
+    qdrantRetryMaxDelayMs,
     lancedbPath,
     embeddingProvider,
     openaiApiKey,

@@ -25,14 +25,30 @@ function toQdrantUUID(id: string): string {
 }
 
 /**
+ * Logger function for retry operations.
+ * Can be overridden via setRetryLogger for custom logging (e.g., sync-worker).
+ */
+let retryLogger: (message: string) => void = (msg) => console.error(msg);
+
+export function setRetryLogger(logger: (message: string) => void): void {
+  retryLogger = logger;
+}
+
+/**
  * Retry helper for Qdrant operations.
  * Retries on connection errors with exponential backoff.
  */
 async function withRetry<T>(
   operation: () => Promise<T>,
-  options: { maxRetries?: number; baseDelayMs?: number; operationName?: string } = {}
+  options: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number; operationName?: string } = {}
 ): Promise<T> {
-  const { maxRetries = 5, baseDelayMs = 1000, operationName = "operation" } = options;
+  const config = getConfig();
+  const {
+    maxRetries = config.qdrantRetryMax,
+    baseDelayMs = config.qdrantRetryDelayMs,
+    maxDelayMs = config.qdrantRetryMaxDelayMs,
+    operationName = "operation"
+  } = options;
   let lastError: Error | undefined;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -40,22 +56,46 @@ async function withRetry<T>(
       return await operation();
     } catch (error: any) {
       lastError = error;
+      const errorMsg = (error.message || "").toLowerCase();
+      const errorStr = String(error).toLowerCase();
+      const causeMsg = (error.cause?.message || "").toLowerCase();
+
       const isRetryable =
-        error.message?.includes("fetch failed") ||
-        error.message?.includes("ECONNREFUSED") ||
-        error.message?.includes("ECONNRESET") ||
-        error.message?.includes("ENETUNREACH") ||
-        error.message?.includes("ETIMEDOUT") ||
+        // Connection errors
+        errorMsg.includes("fetch failed") ||
+        errorMsg.includes("econnrefused") ||
+        errorMsg.includes("econnreset") ||
+        errorMsg.includes("enetunreach") ||
+        errorMsg.includes("etimedout") ||
+        errorMsg.includes("socket hang up") ||
+        errorMsg.includes("network") ||
+        causeMsg.includes("econnrefused") ||
+        causeMsg.includes("econnreset") ||
         error.code === "ECONNREFUSED" ||
         error.code === "ECONNRESET" ||
-        error.code === "ENETUNREACH";
+        error.code === "ENETUNREACH" ||
+        error.code === "ETIMEDOUT" ||
+        // HTTP errors that indicate temporary unavailability
+        errorMsg.includes("service unavailable") ||
+        errorMsg.includes("bad gateway") ||
+        errorMsg.includes("gateway timeout") ||
+        errorMsg.includes("unavailable") ||
+        errorStr.includes("503") ||
+        errorStr.includes("502") ||
+        errorStr.includes("504") ||
+        error.status === 502 ||
+        error.status === 503 ||
+        error.status === 504 ||
+        error.statusCode === 502 ||
+        error.statusCode === 503 ||
+        error.statusCode === 504;
 
       if (!isRetryable || attempt === maxRetries) {
         throw error;
       }
 
-      const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
-      console.error(`[Qdrant] ${operationName} failed (attempt ${attempt}/${maxRetries}): ${error.message}. Retrying in ${delayMs}ms...`);
+      const delayMs = Math.min(baseDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
+      retryLogger(`[Qdrant] ${operationName} failed (attempt ${attempt}/${maxRetries}): ${error.message}. Retrying in ${delayMs}ms...`);
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }
