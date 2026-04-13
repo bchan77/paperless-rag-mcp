@@ -10,7 +10,58 @@
  * - Supports LanceDB (default) and Qdrant
  */
 
+import { createHash } from "crypto";
 import { getConfig, getStorageMode } from "./config.js";
+import { getEmbeddingDimension } from "./embeddings.js";
+
+/**
+ * Convert a string ID to a valid UUID format for Qdrant.
+ * Uses SHA-256 hash to generate a deterministic UUID from the chunk ID.
+ */
+function toQdrantUUID(id: string): string {
+  const hash = createHash("sha256").update(id).digest("hex");
+  // Format as UUID: 8-4-4-4-12
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+}
+
+/**
+ * Retry helper for Qdrant operations.
+ * Retries on connection errors with exponential backoff.
+ */
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  options: { maxRetries?: number; baseDelayMs?: number; operationName?: string } = {}
+): Promise<T> {
+  const { maxRetries = 5, baseDelayMs = 1000, operationName = "operation" } = options;
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      const isRetryable =
+        error.message?.includes("fetch failed") ||
+        error.message?.includes("ECONNREFUSED") ||
+        error.message?.includes("ECONNRESET") ||
+        error.message?.includes("ENETUNREACH") ||
+        error.message?.includes("ETIMEDOUT") ||
+        error.code === "ECONNREFUSED" ||
+        error.code === "ECONNRESET" ||
+        error.code === "ENETUNREACH";
+
+      if (!isRetryable || attempt === maxRetries) {
+        throw error;
+      }
+
+      const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+      console.error(`[Qdrant] ${operationName} failed (attempt ${attempt}/${maxRetries}): ${error.message}. Retrying in ${delayMs}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw lastError;
+}
 
 export interface DocumentChunk {
   id: string;
@@ -326,45 +377,63 @@ import { QdrantClient } from "@qdrant/js-client-rest";
 
 class QdrantVectorStore implements VectorStore {
   private client: QdrantClient | null = null;
-  private readonly url: string;
+  private readonly host: string;
+  private readonly port: number;
+  private readonly https: boolean;
   private readonly collection: string;
   private readonly indexedCollection: string;
-  
+
   constructor(url: string, collection: string) {
-    this.url = url;
+    // Parse URL to extract host, port, and protocol
+    // QdrantClient requires host and port separately - it ignores port in url parameter
+    const parsed = new URL(url);
+    this.host = parsed.hostname;
+    this.https = parsed.protocol === 'https:';
+    // URL.port returns empty string for default ports (80 for http, 443 for https)
+    // Default to protocol's standard port, not Qdrant's 6333
+    const defaultPort = this.https ? 443 : 80;
+    this.port = parsed.port ? parseInt(parsed.port, 10) : defaultPort;
     this.collection = collection;
     this.indexedCollection = `${collection}_indexed`;
   }
-  
+
   async initialize(): Promise<void> {
-    this.client = new QdrantClient({ url: this.url });
-    
-    // Create main collection if not exists
-    const collections = await this.client.getCollections();
-    const collectionNames = collections.collections.map(c => c.name);
-    
-    if (!collectionNames.includes(this.collection)) {
-      await this.client.createCollection(this.collection, {
-        vectors: { size: 1536, distance: "Cosine" },
-      });
-    }
-    
-    // Create indexed tracking collection if not exists
-    if (!collectionNames.includes(this.indexedCollection)) {
-      await this.client.createCollection(this.indexedCollection, {
-        vectors: { size: 1, distance: "Dot" },  // Dummy vector for tracking
-      });
-    }
+    this.client = new QdrantClient({
+      host: this.host,
+      port: this.port,
+      https: this.https,
+    });
+
+    await withRetry(async () => {
+      // Create main collection if not exists
+      const collections = await this.client!.getCollections();
+      const collectionNames = collections.collections.map(c => c.name);
+      const vectorDimension = getEmbeddingDimension();
+
+      if (!collectionNames.includes(this.collection)) {
+        await this.client!.createCollection(this.collection, {
+          vectors: { size: vectorDimension, distance: "Cosine" },
+        });
+      }
+
+      // Create indexed tracking collection if not exists
+      if (!collectionNames.includes(this.indexedCollection)) {
+        await this.client!.createCollection(this.indexedCollection, {
+          vectors: { size: 1, distance: "Dot" },  // Dummy vector for tracking
+        });
+      }
+    }, { operationName: "initialize" });
   }
   
   async addDocuments(chunks: DocumentChunk[]): Promise<void> {
     if (!this.client) {
       throw new Error("Vector store not initialized. Call initialize() first.");
     }
-    
+
+    const vectorDimension = getEmbeddingDimension();
     const points = chunks.map((chunk) => ({
-      id: chunk.id,
-      vector: chunk.embedding || new Array(1536).fill(0),
+      id: toQdrantUUID(chunk.id),
+      vector: chunk.embedding || new Array(vectorDimension).fill(0),
       payload: {
         document_id: chunk.documentId,
         chunk_id: chunk.id,
@@ -375,20 +444,23 @@ class QdrantVectorStore implements VectorStore {
         created: chunk.metadata.created,
       },
     }));
-    
-    await this.client.upsert(this.collection, { points });
+
+    await withRetry(
+      () => this.client!.upsert(this.collection, { points }),
+      { operationName: "addDocuments" }
+    );
   }
   
   async search(queryEmbedding: number[], limit: number = 5): Promise<SearchResult[]> {
     if (!this.client) {
       throw new Error("Vector store not initialized. Call initialize() first.");
     }
-    
-    const results = await this.client.search(this.collection, {
-      vector: queryEmbedding,
-      limit,
-    });
-    
+
+    const results = await withRetry(
+      () => this.client!.search(this.collection, { vector: queryEmbedding, limit }),
+      { operationName: "search" }
+    );
+
     return results.map((result) => ({
       id: String(result.id),
       documentId: result.payload?.document_id as number,
@@ -403,26 +475,31 @@ class QdrantVectorStore implements VectorStore {
     if (!this.client) {
       return;
     }
-    
-    await this.client.delete(this.collection, {
-      filter: {
-        must: [{ key: "document_id", match: { value: documentId } }],
-      },
-    });
-    
-    await this.client.delete(this.indexedCollection, {
-      filter: {
-        must: [{ key: "document_id", match: { value: documentId } }],
-      },
-    });
+
+    await withRetry(async () => {
+      await this.client!.delete(this.collection, {
+        filter: {
+          must: [{ key: "document_id", match: { value: documentId } }],
+        },
+      });
+
+      await this.client!.delete(this.indexedCollection, {
+        filter: {
+          must: [{ key: "document_id", match: { value: documentId } }],
+        },
+      });
+    }, { operationName: "deleteDocument" });
   }
   
   async stats(): Promise<{ count: number; storageMode: "qdrant" | "lancedb" }> {
     if (!this.client) {
       return { count: 0, storageMode: "qdrant" };
     }
-    
-    const info = await this.client.getCollection(this.collection);
+
+    const info = await withRetry(
+      () => this.client!.getCollection(this.collection),
+      { operationName: "stats" }
+    );
     return { count: info.points_count || 0, storageMode: "qdrant" };
   }
   
@@ -430,14 +507,17 @@ class QdrantVectorStore implements VectorStore {
     if (!this.client) {
       return [];
     }
-    
-    const results = await this.client.scroll(this.collection, {
-      limit,
-      filter: documentId !== undefined ? {
-        must: [{ key: "document_id", match: { value: documentId } }],
-      } : undefined,
-    });
-    
+
+    const results = await withRetry(
+      () => this.client!.scroll(this.collection, {
+        limit,
+        filter: documentId !== undefined ? {
+          must: [{ key: "document_id", match: { value: documentId } }],
+        } : undefined,
+      }),
+      { operationName: "inspect" }
+    );
+
     return results.points.map((point: any) => ({
       chunk_id: point.payload?.chunk_id || String(point.id),
       document_id: point.payload?.document_id,
@@ -453,20 +533,23 @@ class QdrantVectorStore implements VectorStore {
     if (!this.client) {
       return { total_indexed: 0, documents: [], last_sync: null };
     }
-    
-    const results = await this.client.scroll(this.indexedCollection, { limit: 10000 });
-    
+
+    const results = await withRetry(
+      () => this.client!.scroll(this.indexedCollection, { limit: 10000 }),
+      { operationName: "getSyncStatus" }
+    );
+
     const documents: IndexedDocument[] = results.points.map((point: any) => ({
       document_id: point.payload?.document_id,
       last_modified: point.payload?.last_modified || "",
       indexed_at: point.payload?.indexed_at || "",
       chunk_count: point.payload?.chunk_count || 0,
     }));
-    
-    const lastSync = documents.length > 0 
+
+    const lastSync = documents.length > 0
       ? documents.reduce((latest, doc) => doc.indexed_at > latest ? doc.indexed_at : latest, documents[0].indexed_at)
       : null;
-    
+
     return {
       total_indexed: documents.length,
       documents,
@@ -478,16 +561,19 @@ class QdrantVectorStore implements VectorStore {
     if (!this.client) {
       return documents.map(d => d.id);
     }
-    
-    const results = await this.client.scroll(this.indexedCollection, { limit: 10000 });
+
+    const results = await withRetry(
+      () => this.client!.scroll(this.indexedCollection, { limit: 10000 }),
+      { operationName: "getDocumentsNeedingSync" }
+    );
     const indexed = new Map<number, { last_modified: string }>();
-    
+
     results.points.forEach((point: any) => {
       indexed.set(point.payload?.document_id, { last_modified: point.payload?.last_modified });
     });
-    
+
     const needsSync: number[] = [];
-    
+
     for (const doc of documents) {
       const existing = indexed.get(doc.id);
       if (!existing) {
@@ -496,7 +582,7 @@ class QdrantVectorStore implements VectorStore {
         needsSync.push(doc.id);
       }
     }
-    
+
     return needsSync;
   }
 
@@ -504,27 +590,29 @@ class QdrantVectorStore implements VectorStore {
     if (!this.client) {
       return;
     }
-    
+
     const indexedAt = new Date().toISOString();
-    
-    // Delete existing
-    await this.client.delete(this.indexedCollection, {
-      filter: { must: [{ key: "document_id", match: { value: documentId } }] },
-    });
-    
-    // Add new entry
-    await this.client.upsert(this.indexedCollection, {
-      points: [{
-        id: `doc_${documentId}`,
-        vector: [1],  // Dummy vector
-        payload: {
-          document_id: documentId,
-          last_modified: lastModified,
-          indexed_at: indexedAt,
-          chunk_count: chunkCount,
-        },
-      }],
-    });
+
+    await withRetry(async () => {
+      // Delete existing
+      await this.client!.delete(this.indexedCollection, {
+        filter: { must: [{ key: "document_id", match: { value: documentId } }] },
+      });
+
+      // Add new entry
+      await this.client!.upsert(this.indexedCollection, {
+        points: [{
+          id: toQdrantUUID(`doc_${documentId}`),
+          vector: [1],  // Dummy vector
+          payload: {
+            document_id: documentId,
+            last_modified: lastModified,
+            indexed_at: indexedAt,
+            chunk_count: chunkCount,
+          },
+        }],
+      });
+    }, { operationName: "markDocumentsIndexed" });
   }
 }
 
