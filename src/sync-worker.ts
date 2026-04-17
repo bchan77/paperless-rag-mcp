@@ -4,7 +4,7 @@
  * Processes documents in batches to avoid memory issues
  */
 
-import { getVectorStore } from "./vector-store.js";
+import { getVectorStore, setRetryLogger } from "./vector-store.js";
 import { PaperlessAPI } from "@baruchiro/paperless-mcp/build/api/PaperlessAPI.js";
 import { initConfig, getConfig } from "./config.js";
 import { embedTexts, chunkText } from "./embeddings.js";
@@ -237,6 +237,9 @@ async function main() {
   let totalDocsProcessed = 0;
   let totalChunksCreated = 0;
   let totalSkipped = 0;
+
+  // Configure retry logger to use sync-worker's log file
+  setRetryLogger(log);
 
   try {
     initConfig();

@@ -120,6 +120,27 @@ export async function embedTexts(texts: string[], onProgress?: (current: number,
 }
 
 /**
+ * Get the embedding dimension for the current provider/model.
+ */
+export function getEmbeddingDimension(): number {
+  const config = getConfig();
+
+  if (config.embeddingProvider === "ollama") {
+    // Common Ollama embedding model dimensions
+    const model = config.ollamaEmbedModel.toLowerCase();
+    if (model.includes("nomic-embed-text")) return 768;
+    if (model.includes("mxbai-embed")) return 1024;
+    if (model.includes("all-minilm")) return 384;
+    if (model.includes("snowflake-arctic-embed")) return 1024;
+    // Default for unknown models - nomic-embed-text is most common
+    return 768;
+  }
+
+  // OpenAI text-embedding-3-small and text-embedding-ada-002 use 1536
+  return 1536;
+}
+
+/**
  * Split a long document into chunks.
  */
 export function chunkText(text: string, chunkSize: number = 500, overlap: number = 50): string[] {
