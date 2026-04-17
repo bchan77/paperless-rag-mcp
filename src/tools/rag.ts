@@ -683,10 +683,9 @@ export const ragTools: Tool[] = [
         const paperless = getPaperlessAPI();
         
         log("info", "[rag_pending] Fetching all documents from Paperless...");
-        
-        // Fetch all documents from Paperless
-        const response = await paperless.getDocuments();
-        const paperlessDocs = response.results;
+
+        // Fetch all documents from Paperless (with pagination)
+        const paperlessDocs = await fetchAllDocuments(paperless);
         
         // Get sync status from vector store
         const syncStatus = await store.getSyncStatus();
@@ -699,10 +698,13 @@ export const ragTools: Tool[] = [
         
         const never_indexed: Array<{ id: number; title: string; created: string }> = [];
         const out_of_sync: Array<{ id: number; title: string; last_modified: string; indexed_at: string }> = [];
-        
+
+        // Track which Paperless doc IDs exist
+        const paperlessIds = new Set(paperlessDocs.map(d => String(d.id)));
+
         for (const doc of paperlessDocs) {
           const indexed = indexedMap.get(String(doc.id));
-          
+
           if (!indexed) {
             // Never indexed
             never_indexed.push({
@@ -720,15 +722,25 @@ export const ragTools: Tool[] = [
             });
           }
         }
-        
-        log("info", `[rag_pending] Found ${never_indexed.length} never indexed, ${out_of_sync.length} out of sync`);
-        
+
+        // Calculate orphaned index entries (indexed docs that no longer exist in Paperless)
+        const orphanedIndexIds = syncStatus.documents
+          .filter(d => !paperlessIds.has(String(d.document_id)))
+          .map(d => d.document_id);
+
+        // Docs that are indexed AND still exist in Paperless AND up-to-date
+        const indexed_and_current = paperlessDocs.length - never_indexed.length - out_of_sync.length;
+
+        log("info", `[rag_pending] Found ${never_indexed.length} never indexed, ${out_of_sync.length} out of sync, ${orphanedIndexIds.length} orphaned in index`);
+
         return {
           total_paperless_docs: paperlessDocs.length,
-          total_indexed: syncStatus.total_indexed,
+          indexed_and_current,
           never_indexed_count: never_indexed.length,
           out_of_sync_count: out_of_sync.length,
           pending_count: never_indexed.length + out_of_sync.length,
+          orphaned_in_index: orphanedIndexIds.length,
+          total_in_index: syncStatus.total_indexed,
           never_indexed,
           out_of_sync,
         };
