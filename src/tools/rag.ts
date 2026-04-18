@@ -698,6 +698,7 @@ export const ragTools: Tool[] = [
         
         const never_indexed: Array<{ id: number; title: string; created: string }> = [];
         const out_of_sync: Array<{ id: number; title: string; last_modified: string; indexed_at: string }> = [];
+        let indexed_and_current_count = 0;
 
         // Track which Paperless doc IDs exist
         const paperlessIds = new Set(paperlessDocs.map(d => String(d.id)));
@@ -720,6 +721,9 @@ export const ragTools: Tool[] = [
               last_modified: doc.modified,
               indexed_at: indexed.indexed_at,
             });
+          } else {
+            // Indexed and up-to-date
+            indexed_and_current_count++;
           }
         }
 
@@ -728,19 +732,17 @@ export const ragTools: Tool[] = [
           .filter(d => !paperlessIds.has(String(d.document_id)))
           .map(d => d.document_id);
 
-        // Docs that are indexed AND still exist in Paperless AND up-to-date
-        const indexed_and_current = paperlessDocs.length - never_indexed.length - out_of_sync.length;
-
-        log("info", `[rag_pending] Found ${never_indexed.length} never indexed, ${out_of_sync.length} out of sync, ${orphanedIndexIds.length} orphaned in index`);
+        log("info", `[rag_pending] Found ${never_indexed.length} never indexed, ${out_of_sync.length} out of sync, ${orphanedIndexIds.length} orphaned in index, ${indexed_and_current_count} indexed and current`);
+        log("info", `[rag_pending] Index stats: syncStatus.total_indexed=${syncStatus.total_indexed}, indexedMap.size=${indexedMap.size}`);
 
         return {
           total_paperless_docs: paperlessDocs.length,
-          indexed_and_current,
+          indexed_and_current: indexed_and_current_count,
           never_indexed_count: never_indexed.length,
           out_of_sync_count: out_of_sync.length,
           pending_count: never_indexed.length + out_of_sync.length,
           orphaned_in_index: orphanedIndexIds.length,
-          total_in_index: syncStatus.total_indexed,
+          total_in_index: indexedMap.size,
           never_indexed,
           out_of_sync,
         };
