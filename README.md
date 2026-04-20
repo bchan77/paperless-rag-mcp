@@ -4,7 +4,10 @@ An MCP server that combines [paperless-mcp](https://github.com/baruchiro/paperle
 
 ## ⚠️ Status
 
-**Core functionality is working.** This project is actively developed and tested.
+**Status:** This project is under active development and testing. Core functionality is operational on macOS.
+
+> [!IMPORTANT]
+> This project has been developed and tested on **macOS**. Compatibility with other platforms (Linux, Windows) has not been verified yet.
 
 ### ✅ Working Features
 
@@ -14,9 +17,11 @@ An MCP server that combines [paperless-mcp](https://github.com/baruchiro/paperle
 | Document sync | Sync documents to vector store (LanceDB or Qdrant) |
 | Delta sync | Only syncs new/modified documents |
 | Background jobs | Sync runs in background, survives MCP restarts |
+| Pagination | Handles large document sets (all docs fetched) |
 | Vector search | Query documents using natural language |
 | Summarization | Summarize documents using LLM (OpenAI, OpenRouter, local) |
 | Kill switch | `rag_sync_kill` to stop running sync |
+| Sync monitoring | Track index state: pending, out-of-sync, orphaned |
 
 ### 🔄 MCP Integration (WIP)
 
@@ -56,6 +61,7 @@ MCP-Compatible AI Assistant → paperless-rag-mcp → Paperless-ngx
 - 📄 Document summarization
 - 💬 Q&A over document content
 - 🔄 Sync documents to vector store (background, interruptible)
+- 📊 Track sync state (pending, out-of-sync, orphaned)
 - 📦 Uses `@baruchiro/paperless-mcp` as npm dependency
 - 🤖 Works with MCP-compatible AI assistants (Claude, OpenClaw, Cursor, etc.)
 - 🔀 Supports multiple LLM providers (OpenAI, OpenRouter, local)
@@ -154,14 +160,59 @@ paperless-rag-mcp/
 **Paperless Tools:**
 - `paperless_list_documents` - List all documents
 - `paperless_get_document` - Get a specific document
+- `paperless_search_documents` - Full-text search
 
 **RAG Tools:**
 - `rag_query` - Query documents using natural language
 - `rag_summarize` - Summarize a document
 - `rag_sync` - Sync documents from Paperless to vector store (background)
-- `rag_sync_status` - Check sync progress
+- `rag_sync_status` - Check background sync job progress
+- `rag_sync_status_all` - List all indexed documents with sync timestamps
 - `rag_sync_kill` - Stop running sync
 - `rag_stats` - Get vector store statistics
+- `rag_pending` - Show unindexed and out-of-sync documents
+- `rag_debug` - Inspect vector store contents (dev use)
+
+## Monitoring & Troubleshooting
+
+### Check what's pending sync
+
+Use `rag_pending` to see documents that need attention:
+
+```javascript
+// See all documents needing sync
+await rag_pending();
+
+// Returns:
+{
+  total_paperless_docs: 100,    // Total docs in Paperless
+  indexed_and_current: 70,       // Docs indexed and up-to-date
+  never_indexed_count: 20,        // Docs never indexed
+  out_of_sync_count: 5,          // Docs modified since last index
+  orphaned_in_index: 3,        // Docs in index but deleted from Paperless
+  pending_count: 25,            // Total needing action (20 + 5)
+  never_indexed: [...],         // List of never-indexed docs
+  out_of_sync: [...],           // List of out-of-sync docs
+}
+```
+
+### Monitor background sync job
+
+Use `rag_sync_status` to check if a sync is running:
+
+```javascript
+await rag_sync_status();
+// Returns: { status, progress, result, error, job_id, ... }
+```
+
+### See all indexed documents
+
+Use `rag_sync_status_all` to list what's in the vector store:
+
+```javascript
+await rag_sync_status_all();
+// Returns: { indexed_documents: [{ document_id, last_modified, indexed_at }] }
+```
 
 ## Testing
 
