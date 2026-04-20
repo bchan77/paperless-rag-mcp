@@ -4,7 +4,10 @@ An MCP server that combines [paperless-mcp](https://github.com/baruchiro/paperle
 
 ## ⚠️ Status
 
-**Core functionality is working.** This project is actively developed and tested.
+**Status:** This project is under active development and testing. Core functionality is operational on macOS.
+
+> [!IMPORTANT]
+> This project has been developed and tested on **macOS**. Compatibility with other platforms (Linux, Windows) has not been verified yet.
 
 ### ✅ Working Features
 
