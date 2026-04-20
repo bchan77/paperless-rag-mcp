@@ -674,6 +674,84 @@ export const ragTools: Tool[] = [
     },
   },
   {
+    name: "rag_pending",
+    description: "Show documents that need to be indexed or re-indexed.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
+      try {
+        const store = await getVectorStore();
+        const paperless = getPaperlessAPI();
+        
+        log("info", "[rag_pending] Fetching all documents from Paperless...");
+
+        // Fetch all documents from Paperless (with pagination)
+        const paperlessDocs = await fetchAllDocuments(paperless);
+        
+        // Get sync status from vector store
+        const syncStatus = await store.getSyncStatus();
+        
+        // Build map of indexed docs
+        const indexedMap = new Map<string, { last_modified: string; indexed_at: string }>();
+        for (const doc of syncStatus.documents) {
+          indexedMap.set(String(doc.document_id), { last_modified: doc.last_modified, indexed_at: doc.indexed_at });
+        }
+        
+        const never_indexed: Array<{ id: number; title: string; created: string }> = [];
+        const out_of_sync: Array<{ id: number; title: string; last_modified: string; indexed_at: string }> = [];
+        let indexed_and_current_count = 0;
+
+        // Track which Paperless doc IDs exist
+        const paperlessIds = new Set(paperlessDocs.map(d => String(d.id)));
+
+        for (const doc of paperlessDocs) {
+          const indexed = indexedMap.get(String(doc.id));
+
+          if (!indexed) {
+            // Never indexed
+            never_indexed.push({
+              id: doc.id,
+              title: doc.title || `Document ${doc.id}`,
+              created: doc.created || "",
+            });
+          } else if (doc.modified && indexed.last_modified && doc.modified > indexed.last_modified) {
+            // Out of sync - doc was modified after it was indexed
+            out_of_sync.push({
+              id: doc.id,
+              title: doc.title || `Document ${doc.id}`,
+              last_modified: doc.modified,
+              indexed_at: indexed.indexed_at,
+            });
+          } else {
+            // Indexed and up-to-date
+            indexed_and_current_count++;
+          }
+        }
+
+        // Calculate orphaned index entries (indexed docs that no longer exist in Paperless)
+        const orphanedIndexIds = syncStatus.documents
+          .filter(d => !paperlessIds.has(String(d.document_id)))
+          .map(d => d.document_id);
+
+        log("info", `[rag_pending] Found ${never_indexed.length} never indexed, ${out_of_sync.length} out of sync, ${orphanedIndexIds.length} orphaned in index, ${indexed_and_current_count} indexed and current`);
+        log("info", `[rag_pending] Index stats: syncStatus.total_indexed=${syncStatus.total_indexed}, indexedMap.size=${indexedMap.size}`);
+
+        return {
+          total_paperless_docs: paperlessDocs.length,
+          indexed_and_current: indexed_and_current_count,
+          never_indexed_count: never_indexed.length,
+          out_of_sync_count: out_of_sync.length,
+          pending_count: never_indexed.length + out_of_sync.length,
+          orphaned_in_index: orphanedIndexIds.length,
+          total_in_index: indexedMap.size,
+          never_indexed,
+          out_of_sync,
+        };
+      } catch (error) {
+        return { status: "error", error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  },
+  {
     name: "rag_stats",
     description: "Get vector store statistics.",
     inputSchema: { type: "object", properties: {} },
