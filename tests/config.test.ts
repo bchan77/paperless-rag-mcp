@@ -30,6 +30,7 @@ describe("config validation", () => {
   it("should load config with required variables", () => {
     process.env.PAPERLESS_URL = "http://paperless.local";
     process.env.PAPERLESS_TOKEN = "test-token";
+    process.env.OPENAI_API_KEY = "test-openai-key";
     
     const { loadConfig } = require("../src/config");
     const config = loadConfig();
@@ -41,6 +42,7 @@ describe("config validation", () => {
   it("should use default values for optional variables", () => {
     process.env.PAPERLESS_URL = "http://paperless.local";
     process.env.PAPERLESS_TOKEN = "test-token";
+    process.env.OPENAI_API_KEY = "test-openai-key";
     
     const { loadConfig } = require("../src/config");
     const config = loadConfig();
@@ -52,6 +54,7 @@ describe("config validation", () => {
   it("should read QDRANT_URL from environment", () => {
     process.env.PAPERLESS_URL = "http://paperless.local";
     process.env.PAPERLESS_TOKEN = "test-token";
+    process.env.OPENAI_API_KEY = "test-openai-key";
     process.env.QDRANT_URL = "http://qdrant.local:6333";
     
     const { loadConfig } = require("../src/config");
@@ -63,6 +66,7 @@ describe("config validation", () => {
   it("should read OPENAI_MODEL from environment", () => {
     process.env.PAPERLESS_URL = "http://paperless.local";
     process.env.PAPERLESS_TOKEN = "test-token";
+    process.env.OPENAI_API_KEY = "test-openai-key";
     process.env.OPENAI_MODEL = "gpt-4o";
     
     const { loadConfig } = require("../src/config");
@@ -76,6 +80,7 @@ describe("getStorageMode", () => {
   it("should return 'lancedb' when QDRANT_URL is not set", () => {
     process.env.PAPERLESS_URL = "http://paperless.local";
     process.env.PAPERLESS_TOKEN = "test-token";
+    process.env.OPENAI_API_KEY = "test-openai-key";
     delete process.env.QDRANT_URL;
     
     const { loadConfig, getStorageMode } = require("../src/config");
@@ -87,6 +92,7 @@ describe("getStorageMode", () => {
   it("should return 'qdrant' when QDRANT_URL is set", () => {
     process.env.PAPERLESS_URL = "http://paperless.local";
     process.env.PAPERLESS_TOKEN = "test-token";
+    process.env.OPENAI_API_KEY = "test-openai-key";
     process.env.QDRANT_URL = "http://qdrant.local:6333";
     
     const { loadConfig, getStorageMode } = require("../src/config");
