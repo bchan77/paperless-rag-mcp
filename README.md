@@ -23,11 +23,6 @@ An MCP server that combines [paperless-mcp](https://github.com/baruchiro/paperle
 | Kill switch | `rag_sync_kill` to stop running sync |
 | Sync monitoring | Track index state: pending, out-of-sync, orphaned |
 
-### 🔄 MCP Integration (WIP)
-
-The MCP server is implemented and runs, but **MCP client integration testing is ongoing**.
-The server works with MCP Inspector for manual testing.
-
 ## Overview
 
 This project extends the [paperless-mcp](https://github.com/baruchiro/paperless-mcp) server with RAG capabilities:
@@ -39,14 +34,107 @@ This project extends the [paperless-mcp](https://github.com/baruchiro/paperless-
 ## Architecture
 
 ```
-MCP-Compatible AI Assistant → paperless-rag-mcp → Paperless-ngx
-                                         ↓
-                                  Vector DB (LanceDB or Qdrant)
-                                         ↓
-                                 OpenAI / OpenRouter / Local LLM
-                                         ↓
-                                 Document Embeddings
+┌─────────────────────────────────────────────────────────────────┐
+│                    MCP-Compatible AI Assistant                   │
+│                   (Claude Desktop, OpenClaw, etc.)              │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      paperless-rag-mcp                          │
+│                                                                │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
+│  │ paperless.ts │    │   rag.ts     │    │    jobs.ts       │  │
+│  │             │    │             │    │                  │  │
+│  │ List, get,  │    │ Query,      │    │ createSyncJob    │  │
+│  │ search docs │    │ summarize,  │    │ updateProgress  │  │
+│  │ from       │    │ sync, sync   │    │ getJob, listJobs│  │
+│  │ Paperless  │    │ status      │    │                  │  │
+│  └──────────────┘    └──────────────┘    └──────────────────┘  │
+│         │                   │                    │               │
+│         └───────────────────┼────────────────────┘               │
+│                             ▼                                    │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │                      vector-store.ts                        ││
+│  │                                                             ││
+│  │  LanceDB (default) ◄──────────────► Qdrant (optional)      ││
+│  │  Local file storage                  Remote vector DB       ││
+│  │  No setup needed                     Better for production ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                             │                                    │
+│                             ▼                                    │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │                      embeddings.ts                          ││
+│  │                                                             ││
+│  │  OpenAI (text-embedding-3-small) ◄── or ──► Ollama (local)  ││
+│  │  1536 dimensions                    nomic-embed-text         ││
+│  └─────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      External Services                           │
+│                                                                │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌────────────┐ │
+│  │  Paperless-ngx  │    │ OpenAI / Local  │    │  LLM for   │ │
+│  │  Document API   │    │ Embeddings API  │    │ summarizer │ │
+│  └─────────────────┘    └─────────────────┘    └────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+## How Document Sync Works
+
+The sync process is designed to be **resilient** and **interruptible**:
+
+```
+1. rag_sync called
+   └── Creates job in jobs.ts
+   └── Spawns sync-worker.ts as background process
+   └── Returns immediately with job_id
+
+2. sync-worker.ts runs independently:
+   └── Fetches ALL documents from Paperless (with pagination)
+   └── For each document:
+       ├── Download document content
+       ├── Chunk text (configurable size/overlap)
+       ├── Generate embeddings (OpenAI or Ollama)
+       └── Store in LanceDB or Qdrant
+
+3. MCP server can restart during sync:
+   └── sync-worker detects if parent died
+   └── Parent check every 10 seconds
+   └── Worker exits if MCP server dies
+
+4. Track sync state:
+   └── vector-store.ts maintains sync metadata
+   └── rag_pending shows: never indexed, out-of-sync, orphaned
+```
+
+### Sync Worker Process
+
+The sync worker (`sync-worker.ts`) is a **standalone process** that:
+
+- Runs in the background separate from the MCP server
+- Processes documents in **batches of 50** to avoid memory issues
+- Logs to `./logs/sync-worker.log`
+- Writes status to `./data/sync-status.json`
+- Stores PID in `./data/sync-worker.pid`
+- Detects if parent MCP server died and exits gracefully
+
+### Delta Sync (Efficient Updates)
+
+The sync is **incremental**:
+
+1. `rag_pending` compares:
+   - Documents in Paperless
+   - Documents in vector store with their `last_modified` timestamps
+
+2. Only documents that are:
+   - **Never indexed** (new)
+   - **Out of sync** (modified since last index)
+   - **Orphaned** (deleted from Paperless but still in index)
+
+3. No re-indexing of unchanged documents
 
 ## Tech Stack
 
@@ -138,28 +226,39 @@ ollama pull nomic-embed-text
 ```
 paperless-rag-mcp/
 ├── src/
-│   ├── index.ts           # Main MCP server
-│   ├── config.ts          # Configuration
-│   ├── embeddings.ts       # Text embedding
-│   ├── vector-store.ts    # LanceDB/Qdrant abstraction
-│   ├── sync-worker.ts     # Background sync worker
-│   ├── jobs.ts            # Job management
-│   ├── logger.ts          # Logging
+│   ├── index.ts           # Main MCP server entry point
+│   ├── config.ts          # Environment variable loading and validation
+│   ├── embeddings.ts      # OpenAI/Ollama embedding generation
+│   ├── vector-store.ts    # LanceDB/Qdrant abstraction layer
+│   ├── sync-worker.ts     # Standalone background sync process
+│   ├── jobs.ts            # In-memory job management
+│   ├── logger.ts          # File-based logging
 │   └── tools/
-│       ├── types.ts       # Shared types
+│       ├── types.ts       # Shared TypeScript interfaces
 │       ├── paperless.ts   # Paperless document tools
-│       └── rag.ts         # RAG tools
+│       └── rag.ts         # RAG query/summarize/sync tools
+├── tests/
+│   ├── chunkText.test.ts  # Text chunking tests
+│   ├── config.test.ts     # Config loading tests
+│   └── jobs.test.ts       # Job management tests
+├── data/                  # Runtime data (gitignored)
+│   ├── lancedb/          # LanceDB storage
+│   ├── sync-status.json  # Current sync state
+│   └── sync-worker.pid   # Background worker PID
+├── logs/                  # Log files (gitignored)
+│   └── sync-worker.log   # Sync worker logs
 ├── .env.example
 ├── package.json
 ├── tsconfig.json
+├── jest.config.js
 └── README.md
 ```
 
 ### Available Tools
 
 **Paperless Tools:**
-- `paperless_list_documents` - List all documents
-- `paperless_get_document` - Get a specific document
+- `paperless_list_documents` - List all documents with pagination
+- `paperless_get_document` - Get a specific document by ID
 - `paperless_search_documents` - Full-text search
 
 **RAG Tools:**
@@ -180,19 +279,18 @@ paperless-rag-mcp/
 Use `rag_pending` to see documents that need attention:
 
 ```javascript
-// See all documents needing sync
 await rag_pending();
 
 // Returns:
 {
-  total_paperless_docs: 100,    // Total docs in Paperless
-  indexed_and_current: 70,       // Docs indexed and up-to-date
-  never_indexed_count: 20,        // Docs never indexed
-  out_of_sync_count: 5,          // Docs modified since last index
-  orphaned_in_index: 3,        // Docs in index but deleted from Paperless
-  pending_count: 25,            // Total needing action (20 + 5)
-  never_indexed: [...],         // List of never-indexed docs
-  out_of_sync: [...],           // List of out-of-sync docs
+  total_paperless_docs: 100,
+  indexed_and_current: 70,       // Indexed and up-to-date
+  never_indexed_count: 20,        // Never been indexed
+  out_of_sync_count: 5,           // Modified since last index
+  orphaned_in_index: 3,          // In index but deleted from Paperless
+  pending_count: 25,              // Total needing action
+  never_indexed: [...],           // List with id, title, created
+  out_of_sync: [...],             // List with id, title, last_modified, indexed_at
 }
 ```
 
@@ -212,6 +310,23 @@ Use `rag_sync_status_all` to list what's in the vector store:
 ```javascript
 await rag_sync_status_all();
 // Returns: { indexed_documents: [{ document_id, last_modified, indexed_at }] }
+```
+
+### Check logs
+
+```bash
+# View sync worker logs
+tail -f logs/sync-worker.log
+
+# Check sync status file
+cat data/sync-status.json
+```
+
+### Running Tests
+
+```bash
+npm test           # run all tests
+npm run test:watch # run tests in watch mode
 ```
 
 ## Testing
